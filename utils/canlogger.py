@@ -25,14 +25,14 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 from zeroconf_service import LoggerZeroconfService, SERVICE_NAME_PREFIX
 
 HEADER_SIZE = 8 + 4 + 1 + 1  # 14 bytes
-DEFAULT_PORT = 2518
 DEFAULT_BITRATE = 500000
 DEFAULT_INTERFACE = "gs_usb"
+AUTO_PORT_START = 42420
 
 HELP_DESCRIPTION = """\
 ECUconnect CAN Logger Simulator
@@ -225,6 +225,21 @@ def color(text: str, code: str) -> str:
     return f"\033[{code}m{text}\033[0m"
 
 
+def find_available_port(start_port: int = AUTO_PORT_START) -> int:
+    """Find an available TCP port >= start_port."""
+    for port in range(start_port, 65536):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("0.0.0.0", port))
+            return port
+        except OSError:
+            continue
+        finally:
+            sock.close()
+    raise RuntimeError("No free TCP port found in the requested range.")
+
+
 def zeroconf_log(message: str):
     print(f"{ts()} {color('[zeroconf]', '35')} {message}")
 
@@ -297,7 +312,7 @@ def find_gs_usb_device() -> Optional[can.Bus]:
         return None
 
 
-def find_any_can_device(bitrate: int) -> Optional[can.Bus]:
+def find_any_can_device(bitrate: int) -> Optional[Tuple[can.Bus, str]]:
     """Try to find any available CAN device."""
     interfaces_to_try = [
         ("gs_usb", {"channel": 0}),
@@ -310,7 +325,7 @@ def find_any_can_device(bitrate: int) -> Optional[can.Bus]:
         try:
             bus = can.Bus(interface=interface, bitrate=bitrate, **kwargs)
             print(f"{ts()} {color('[can]', '32')} Found CAN device: {interface} ({bus.channel_info})")
-            return bus
+            return bus, interface
         except Exception:
             continue
 
@@ -395,9 +410,9 @@ def main():
     parser.add_argument(
         "--port", "-p",
         type=int,
-        default=DEFAULT_PORT,
+        default=None,
         metavar="PORT",
-        help=f"TCP server port for client connections (default: {DEFAULT_PORT})"
+        help="TCP server port (default: auto-pick >=42420)."
     )
     parser.add_argument(
         "--bitrate", "-b",
@@ -453,15 +468,30 @@ def main():
 
     args = parser.parse_args()
 
+    requested_port = args.port
+    if requested_port is None:
+        try:
+            listen_port = find_available_port()
+        except RuntimeError as e:
+            print(f"{ts()} {color('[error]', '31')} {e}")
+            return 1
+    else:
+        listen_port = requested_port
+
     check_dependencies()
 
+    port_label = f"{listen_port}" if requested_port is not None else f"{listen_port} (auto)"
     print(f"{ts()} {color('[init]', '34')} ECUconnect Logger Simulator starting...")
-    print(f"{ts()} {color('[init]', '34')} TCP port: {args.port}, CAN bitrate: {args.bitrate}")
+    print(f"{ts()} {color('[init]', '34')} TCP port: {port_label}, CAN bitrate: {args.bitrate}")
 
     bus = None
 
     if args.auto:
-        bus = find_any_can_device(args.bitrate)
+        result = find_any_can_device(args.bitrate)
+        if result:
+            bus, args.interface = result
+        else:
+            bus = None
     else:
         try:
             channel = int(args.channel) if args.channel.isdigit() else args.channel
@@ -486,12 +516,15 @@ def main():
                         channel=channel_input,
                         bitrate=args.bitrate
                     )
+                    args.interface = "socketcan"  # Update interface to reflect actual usage
                     print(f"{ts()} {color('[can]', '32')} CAN bus opened: socketcan ({bus.channel_info})")
                 except Exception as sock_err:
                     print(f"{ts()} {color('[can]', '31')} SocketCAN retry failed: {sock_err}")
             if bus is None:
                 print(f"{ts()} {color('[can]', '33')} Trying auto-detection...")
-                bus = find_any_can_device(args.bitrate)
+                result = find_any_can_device(args.bitrate)
+                if result:
+                    bus, args.interface = result
 
     if bus is None:
         print(f"{ts()} {color('[error]', '31')} No CAN device found!")
@@ -509,7 +542,7 @@ def main():
 
     server_thread = threading.Thread(
         target=tcp_server_thread,
-        args=(args.port, client_manager),
+        args=(listen_port, client_manager),
         daemon=True
     )
     server_thread.start()
@@ -521,22 +554,20 @@ def main():
     )
     can_thread.start()
 
-    print(f"{ts()} {color('[ready]', '32')} Simulator ready. Clients can connect to port {args.port}")
+    print(f"{ts()} {color('[ready]', '32')} Simulator ready. Clients can connect to port {listen_port}")
     print(f"{ts()} {color('[ready]', '32')} Press Ctrl+C to stop")
 
     zeroconf_service = None
     if not args.no_zeroconf:
-        default_name = args.service_name or f"{SERVICE_NAME_PREFIX} {socket.gethostname()}:{args.port}"
+        default_name = args.service_name or f"{SERVICE_NAME_PREFIX} {socket.gethostname()}:{listen_port}"
         metadata = {
-            "system": socket.gethostname(),
             "process": Path(__file__).name,
             "interface": args.interface,
             "channel": args.channel,
             "bitrate": str(args.bitrate),
-            "port": str(args.port),
         }
         zeroconf_service = LoggerZeroconfService(
-            port=args.port,
+            port=listen_port,
             service_name=default_name,
             properties=metadata,
             logger=zeroconf_log,

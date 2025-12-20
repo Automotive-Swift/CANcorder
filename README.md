@@ -99,7 +99,7 @@ python3 utils/rusoku_canlogger.py --channel 0
 3. **Set connection parameters:**
    - **Protocol**: ECUconnect Logger
    - **Host**: `localhost` (or the machine's IP if remote)
-   - **Port**: `2518` (default, or whatever you specified with `--port`)
+   - **Port**: Auto-chosen value shown in the proxy log (≥42420 by default) or whatever you set via `--port`
 4. **Click Connect** - CANcorder will now receive real-time CAN frames
 
 ## Zeroconf Service Discovery
@@ -108,6 +108,7 @@ Both `canlogger.py` and `rusoku_canlogger.py` advertise their TCP service via Ze
 
 - Default instance name: `ECUconnect-Logger <hostname>:<port>` (contains the required `ECUconnect-Logger` prefix).
 - Override with `--service-name "ECUconnect-Logger My TouCAN"` or disable with `--no-zeroconf`.
+- By default a free TCP port ≥42420 is selected automatically and published via Zeroconf; override with `--port` if a fixed port is required.
 - TXT records expose metadata for richer client pickers:
   - `system`: hostname running the proxy
   - `process`: `canlogger.py` or `rusoku_canlogger.py`
@@ -184,7 +185,7 @@ void parse_frame(const uint8_t* packet) {
 
 **Using netcat to view raw packets:**
 ```bash
-nc localhost 2518 | xxd
+nc localhost <PORT_FROM_LOG> | xxd
 ```
 
 **Expected output format:**
@@ -233,11 +234,11 @@ python3 utils/canlogger.py --interface socketcan --channel can0
 
 Run multiple instances for different CAN buses:
 ```bash
-# Terminal 1: CAN0 on port 2518
-python3 utils/canlogger.py -i socketcan -c can0 -p 2518 &
+# Terminal 1: CAN0 on port 42420
+python3 utils/canlogger.py -i socketcan -c can0 -p 42420 &
 
-# Terminal 2: CAN1 on port 2519  
-python3 utils/canlogger.py -i socketcan -c can1 -p 2519 &
+# Terminal 2: CAN1 on port 42421  
+python3 utils/canlogger.py -i socketcan -c can1 -p 42421 &
 ```
 
 Configure multiple connections in CANcorder to capture from both buses.
@@ -258,8 +259,8 @@ python3 utils/rusoku_canlogger.py --bitrate-index -4
 
 **Multiple TouCAN devices:**
 ```bash
-python3 utils/rusoku_canlogger.py --channel 0 --port 2518 &
-python3 utils/rusoku_canlogger.py --channel 1 --port 2519 &
+python3 utils/rusoku_canlogger.py --channel 0 --port 42422 &
+python3 utils/rusoku_canlogger.py --channel 1 --port 42423 &
 ```
 
 ## Implementing Custom Logger Backends
@@ -267,7 +268,7 @@ python3 utils/rusoku_canlogger.py --channel 1 --port 2519 &
 The wire protocol specification above enables you to create custom logger backends for any CAN hardware. A minimal implementation needs to:
 
 1. **Connect to your CAN hardware** using its native API
-2. **Open a TCP server** on port 2518 (or configurable)
+2. **Open a TCP server** on a chosen port (defaults to an auto-picked value ≥42420)
 3. **For each received CAN frame**:
    - Pack it into the 14+dlc byte binary format
    - Broadcast to all connected TCP clients
@@ -301,9 +302,9 @@ The provided utilities serve as reference implementations showing best practices
 
 **Clients not receiving data:**
 - Verify CAN bus has traffic (use `-v` to see frames)
-- Check firewall allows TCP port 2518
+- Check firewall allows the chosen TCP port (see proxy log/Zeroconf entry)
 - Ensure CAN bitrate matches the bus
-- Test with: `nc localhost 2518 | xxd`
+- Test with: `nc localhost <PORT_FROM_LOG> | xxd`
 
 ### Library Issues
 

@@ -32,7 +32,7 @@ import signal
 from zeroconf_service import LoggerZeroconfService, SERVICE_NAME_PREFIX
 
 HEADER_SIZE = 8 + 4 + 1 + 1  # 14 bytes
-DEFAULT_PORT = 2518
+AUTO_PORT_START = 42420
 
 HELP_DESCRIPTION = """\
 ECUconnect CAN Logger Simulator (RusokuCAN Edition)
@@ -342,6 +342,21 @@ def color(text: str, code: str) -> str:
     return f"\033[{code}m{text}\033[0m"
 
 
+def find_available_port(start_port: int = AUTO_PORT_START) -> int:
+    """Find an available TCP port >= start_port."""
+    for port in range(start_port, 65536):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("0.0.0.0", port))
+            return port
+        except OSError:
+            continue
+        finally:
+            sock.close()
+    raise RuntimeError("No free TCP port found in the requested range.")
+
+
 def zeroconf_log(message: str):
     print(f"{ts()} {color('[zeroconf]', '35')} {message}")
 
@@ -510,9 +525,9 @@ def main():
     parser.add_argument(
         "--port", "-p",
         type=int,
-        default=DEFAULT_PORT,
+        default=None,
         metavar="PORT",
-        help=f"TCP server port for client connections (default: {DEFAULT_PORT})"
+        help="TCP server port (default: auto-pick >=42420)."
     )
     parser.add_argument(
         "--bitrate-index", "-b",
@@ -558,8 +573,20 @@ def main():
 
     args = parser.parse_args()
 
+    requested_port = args.port
+    if requested_port is None:
+        try:
+            listen_port = find_available_port()
+        except RuntimeError as e:
+            print(f"{ts()} {color('[error]', '31')} {e}")
+            return 1
+    else:
+        listen_port = requested_port
+
+    port_label = f"{listen_port}" if requested_port is not None else f"{listen_port} (auto)"
+
     print(f"{ts()} {color('[init]', '34')} ECUconnect Logger Simulator (RusokuCAN) starting...")
-    print(f"{ts()} {color('[init]', '34')} TCP port: {args.port}, CAN bitrate: {bitrate_index_to_name(args.bitrate_index)}")
+    print(f"{ts()} {color('[init]', '34')} TCP port: {port_label}, CAN bitrate: {bitrate_index_to_name(args.bitrate_index)}")
 
     try:
         can = TouCANInterface(args.library)
@@ -608,7 +635,7 @@ def main():
 
     server_thread = threading.Thread(
         target=tcp_server_thread,
-        args=(args.port, client_manager, stop_event),
+        args=(listen_port, client_manager, stop_event),
         daemon=True
     )
     server_thread.start()
@@ -620,21 +647,19 @@ def main():
     )
     can_thread.start()
 
-    print(f"{ts()} {color('[ready]', '32')} Simulator ready. Clients can connect to port {args.port}")
+    print(f"{ts()} {color('[ready]', '32')} Simulator ready. Clients can connect to port {listen_port}")
     print(f"{ts()} {color('[ready]', '32')} Press Ctrl+C to stop")
 
     zeroconf_service = None
     if not args.no_zeroconf:
-        default_name = args.service_name or f"{SERVICE_NAME_PREFIX} {socket.gethostname()}:{args.port}"
+        default_name = args.service_name or f"{SERVICE_NAME_PREFIX} {socket.gethostname()}:{listen_port}"
         metadata = {
-            "system": socket.gethostname(),
             "process": Path(__file__).name,
             "channel": str(args.channel),
             "bitrate_index": str(args.bitrate_index),
-            "port": str(args.port),
         }
         zeroconf_service = LoggerZeroconfService(
-            port=args.port,
+            port=listen_port,
             service_name=default_name,
             properties=metadata,
             logger=zeroconf_log,
