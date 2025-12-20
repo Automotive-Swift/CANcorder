@@ -114,7 +114,7 @@ Both `canlogger.py` and `rusoku_canlogger.py` advertise their TCP service via Ze
   - `process`: `canlogger.py` or `rusoku_canlogger.py`
   - `interface`: python-can interface (universal proxy only)
   - `channel`: interface channel or TouCAN index
-  - `bitrate` / `bitrate_index`: bus speed configuration
+  - `bitrate`: bus speed configuration (bits/second)
   - `port`: TCP server port
 
 Discover services by running `dns-sd -B _ecuconnect-log._tcp` or any Zeroconf browser on your LAN.
@@ -245,16 +245,16 @@ Configure multiple connections in CANcorder to capture from both buses.
 
 ### Rusoku TouCAN Specific
 
-**Different bitrates (using predefined indexes):**
+**Different bitrates:**
 ```bash
 # 1000 kbit/s
-python3 utils/rusoku_canlogger.py --bitrate-index 0
+python3 utils/rusoku_canlogger.py --bitrate 1000000
 
 # 250 kbit/s  
-python3 utils/rusoku_canlogger.py --bitrate-index -3
+python3 utils/rusoku_canlogger.py --bitrate 250000
 
 # 125 kbit/s
-python3 utils/rusoku_canlogger.py --bitrate-index -4
+python3 utils/rusoku_canlogger.py --bitrate 125000
 ```
 
 **Multiple TouCAN devices:**

@@ -72,19 +72,19 @@ Rusoku TouCAN USB (recommended for macOS)
   macOS:    Requires libUVCANTOU.dylib installed in /usr/local/lib
 
 
-PREDEFINED BIT-RATES
-====================
+PREDEFINED BITRATES
+===================
 
-Use --bitrate-index with these values:
-   0  = 1000 kbit/s
-  -1  =  800 kbit/s
-  -2  =  500 kbit/s (default)
-  -3  =  250 kbit/s
-  -4  =  125 kbit/s
-  -5  =  100 kbit/s
-  -6  =   50 kbit/s
-  -7  =   20 kbit/s
-  -8  =   10 kbit/s
+Use --bitrate with these values (bits/second):
+  1000000  = 1000 kbit/s
+   800000  =  800 kbit/s
+   500000  =  500 kbit/s (default)
+   250000  =  250 kbit/s
+   125000  =  125 kbit/s
+   100000  =  100 kbit/s
+    50000  =   50 kbit/s
+    20000  =   20 kbit/s
+    10000  =   10 kbit/s
 
 
 EXAMPLES
@@ -97,7 +97,7 @@ With verbose output (shows each CAN frame):
   python3 %(prog)s -v
 
 Custom port and bitrate (250 kbit/s):
-  python3 %(prog)s --port 3000 --bitrate-index -3
+  python3 %(prog)s --port 3000 --bitrate 250000
 
 Different CAN channel:
   python3 %(prog)s --channel 1
@@ -148,16 +148,17 @@ CANERR_NOERROR = 0
 CANERR_RX_EMPTY = -30
 CANREAD_INFINITE = 65535
 
-# Predefined bit-rate indexes (CiA)
-CANBTR_INDEX_1M = c_int32(0)
-CANBTR_INDEX_800K = c_int32(-1)
-CANBTR_INDEX_500K = c_int32(-2)
-CANBTR_INDEX_250K = c_int32(-3)
-CANBTR_INDEX_125K = c_int32(-4)
-CANBTR_INDEX_100K = c_int32(-5)
-CANBTR_INDEX_50K = c_int32(-6)
-CANBTR_INDEX_20K = c_int32(-7)
-CANBTR_INDEX_10K = c_int32(-8)
+BITRATE_INDEX_BY_BPS = {
+    1_000_000: 0,
+    800_000: -1,
+    500_000: -2,
+    250_000: -3,
+    125_000: -4,
+    100_000: -5,
+    50_000: -6,
+    20_000: -7,
+    10_000: -8,
+}
 
 
 class OpModeBits(LittleEndianStructure):
@@ -361,20 +362,14 @@ def can_receiver_thread(can: TouCANInterface, client_manager: ClientManager, ver
 
 
 
-def bitrate_index_to_name(index: int) -> str:
-    """Convert bitrate index to human-readable name."""
-    names = {
-        0: "1000 kbit/s",
-        -1: "800 kbit/s",
-        -2: "500 kbit/s",
-        -3: "250 kbit/s",
-        -4: "125 kbit/s",
-        -5: "100 kbit/s",
-        -6: "50 kbit/s",
-        -7: "20 kbit/s",
-        -8: "10 kbit/s",
-    }
-    return names.get(index, f"index {index}")
+def format_bitrate(bitrate: int) -> str:
+    """Return a user-facing bitrate label."""
+    return f"{bitrate} bps"
+
+
+def bitrate_to_index(bitrate: int) -> Optional[int]:
+    """Convert a bitrate in bits/second to a RusokuCAN bitrate index."""
+    return BITRATE_INDEX_BY_BPS.get(bitrate)
 
 
 def main():
@@ -391,11 +386,11 @@ def main():
         help="TCP server port (default: auto-pick >=42420)."
     )
     parser.add_argument(
-        "--bitrate-index", "-b",
+        "--bitrate", "-b",
         type=int,
-        default=-2,
-        metavar="INDEX",
-        help="CAN bitrate index (default: -2 = 500 kbit/s). "
+        default=500_000,
+        metavar="BPS",
+        help="CAN bitrate in bits/second (default: 500000). "
              "See --help for list of predefined bitrates."
     )
     parser.add_argument(
@@ -446,8 +441,14 @@ def main():
 
     port_label = f"{listen_port}" if requested_port is not None else f"{listen_port} (auto)"
 
+    bitrate_index = bitrate_to_index(args.bitrate)
+    if bitrate_index is None:
+        supported = ", ".join(str(rate) for rate in sorted(BITRATE_INDEX_BY_BPS.keys(), reverse=True))
+        print(f"{ts()} {color('[error]', '31')} Unsupported bitrate {args.bitrate}. Supported bitrates: {supported}")
+        return 1
+
     print(f"{ts()} {color('[init]', '34')} ECUconnect Logger Simulator (RusokuCAN) starting...")
-    print(f"{ts()} {color('[init]', '34')} TCP port: {port_label}, CAN bitrate: {bitrate_index_to_name(args.bitrate_index)}")
+    print(f"{ts()} {color('[init]', '34')} TCP port: {port_label}, CAN bitrate: {format_bitrate(args.bitrate)}")
 
     try:
         can = TouCANInterface(args.library)
@@ -475,9 +476,9 @@ def main():
     print(f"{ts()} {color('[can]', '32')} Firmware: {can.firmware()}")
 
     bitrate = Bitrate()
-    bitrate.index = args.bitrate_index
+    bitrate.index = bitrate_index
 
-    print(f"{ts()} {color('[can]', '34')} Starting CAN controller at {bitrate_index_to_name(args.bitrate_index)}...")
+    print(f"{ts()} {color('[can]', '34')} Starting CAN controller at {format_bitrate(args.bitrate)}...")
     result = can.start(bitrate)
     if result < CANERR_NOERROR:
         print(f"{ts()} {color('[error]', '31')} Failed to start CAN controller: error {result}")
@@ -518,7 +519,7 @@ def main():
             "process": Path(__file__).name,
             "interface": "rusokucan",
             "channel": str(args.channel),
-            "bitrate_index": str(args.bitrate_index),
+            "bitrate": str(args.bitrate),
         }
         zeroconf_service = LoggerZeroconfService(
             port=listen_port,
