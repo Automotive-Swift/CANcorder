@@ -19,20 +19,31 @@ Default TCP port: 2518
 import argparse
 import can
 import socket
-import struct
 import sys
 import threading
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
 from zeroconf_service import LoggerZeroconfService, SERVICE_NAME_PREFIX
+from canlogger_common import (
+    HEADER_SIZE,
+    AUTO_PORT_START,
+    ts,
+    color,
+    find_available_port,
+    zeroconf_log,
+    pack_frame as _pack_frame,
+    ClientManager,
+    client_handler_thread,
+    tcp_server_thread,
+    BINARY_PROTOCOL_HELP,
+    TESTING_CONNECTION_HELP,
+    SEE_ALSO_HELP,
+)
 
-HEADER_SIZE = 8 + 4 + 1 + 1  # 14 bytes
 DEFAULT_BITRATE = 500000
 DEFAULT_INTERFACE = "gs_usb"
-AUTO_PORT_START = 42420
 
 HELP_DESCRIPTION = """\
 ECUconnect CAN Logger Simulator
@@ -46,25 +57,7 @@ Use this to test applications that expect to connect to an ECUconnect Logger
 without needing the actual hardware.
 """
 
-HELP_EPILOG = """\
-BINARY PROTOCOL
-===============
-
-Each CAN frame is transmitted as a binary packet with the following format:
-
-  ┌─────────────┬─────────────┬─────────┬─────────┬──────────────────┐
-  │ timestamp   │ can_id      │ ext     │ dlc     │ data             │
-  │ 8 bytes     │ 4 bytes     │ 1 byte  │ 1 byte  │ 0-64 bytes       │
-  └─────────────┴─────────────┴─────────┴─────────┴──────────────────┘
-
-  timestamp : uint64_t, big-endian, microseconds since Unix epoch
-  can_id    : uint32_t, big-endian, CAN arbitration ID
-  ext       : uint8_t, 0 = standard 11-bit ID, 1 = extended 29-bit ID
-  dlc       : uint8_t, data length (0-8 for CAN, 0-64 for CAN-FD)
-  data      : raw CAN payload bytes
-
-  Total packet size: 14 + dlc bytes (14-22 bytes for classic CAN)
-
+HELP_EPILOG = BINARY_PROTOCOL_HELP + """
 
 SUPPORTED CAN INTERFACES
 ========================
@@ -126,17 +119,7 @@ Multiple CAN channels (run multiple instances):
   python3 %(prog)s -i socketcan -c can1 -p 2519 &
 
 
-TESTING THE CONNECTION
-======================
-
-Use the included logger_client.py to test:
-  python3 logger_client.py localhost
-
-Or with netcat:
-  nc localhost 2518 | xxd
-
-Or with the CANyonero app by connecting to this machine's IP on port 2518.
-
+""" + TESTING_CONNECTION_HELP + """
 
 PLATFORM NOTES
 ==============
@@ -183,12 +166,7 @@ Clients not receiving data:
   → Ensure CAN bitrate matches the bus
 
 
-SEE ALSO
-========
-
-  logger_client.py  - Test client for receiving streamed CAN frames
-  canvoy.py         - CAN bridge for remote ISOTP forwarding
-"""
+""" + SEE_ALSO_HELP
 
 def check_dependencies():
     """Check and import required dependencies."""
@@ -217,89 +195,14 @@ def check_dependencies():
         gs_usb = None
 
 
-def ts() -> str:
-    return datetime.now().strftime("%H:%M:%S.%f")[:-3]
-
-
-def color(text: str, code: str) -> str:
-    return f"\033[{code}m{text}\033[0m"
-
-
-def find_available_port(start_port: int = AUTO_PORT_START) -> int:
-    """Find an available TCP port >= start_port."""
-    for port in range(start_port, 65536):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(("0.0.0.0", port))
-            return port
-        except OSError:
-            continue
-        finally:
-            sock.close()
-    raise RuntimeError("No free TCP port found in the requested range.")
-
-
-def zeroconf_log(message: str):
-    print(f"{ts()} {color('[zeroconf]', '35')} {message}")
 
 
 def pack_frame(msg: can.Message) -> bytes:
     """Pack a CAN message into ECUconnect Logger binary format."""
     ts_us = int(time.time() * 1_000_000)
-    can_id = msg.arbitration_id
-    ext = 1 if msg.is_extended_id else 0
-    data = bytes(msg.data)
-    dlc = len(data)
-    return struct.pack(">QIBB", ts_us, can_id, ext, dlc) + data
+    return _pack_frame(ts_us, msg.arbitration_id, msg.is_extended_id, bytes(msg.data))
 
 
-class ClientManager:
-    """Manages connected TCP clients and broadcasts frames to all of them."""
-
-    def __init__(self):
-        self.clients: dict[socket.socket, tuple[str, int]] = {}
-        self.lock = threading.Lock()
-        self.stats = {
-            "frames_sent": 0,
-            "frames_dropped": 0,
-            "bytes_sent": 0,
-        }
-
-    def add_client(self, sock: socket.socket, addr: tuple[str, int]):
-        with self.lock:
-            self.clients[sock] = addr
-            print(f"{ts()} {color('[server]', '34')} Client connected: {addr[0]}:{addr[1]} (total: {len(self.clients)})")
-
-    def remove_client(self, sock: socket.socket):
-        with self.lock:
-            if sock in self.clients:
-                addr = self.clients.pop(sock)
-                print(f"{ts()} {color('[server]', '33')} Client disconnected: {addr[0]}:{addr[1]} (total: {len(self.clients)})")
-                try:
-                    sock.close()
-                except Exception:
-                    pass
-
-    def broadcast(self, data: bytes):
-        """Send data to all connected clients."""
-        with self.lock:
-            dead_clients = []
-            for sock, addr in self.clients.items():
-                try:
-                    sock.sendall(data)
-                    self.stats["frames_sent"] += 1
-                    self.stats["bytes_sent"] += len(data)
-                except (OSError, BrokenPipeError):
-                    dead_clients.append(sock)
-                    self.stats["frames_dropped"] += 1
-
-        for sock in dead_clients:
-            self.remove_client(sock)
-
-    def client_count(self) -> int:
-        with self.lock:
-            return len(self.clients)
 
 
 def find_gs_usb_device() -> Optional[can.Bus]:
@@ -363,42 +266,6 @@ def can_receiver_thread(bus: can.Bus, client_manager: ClientManager, verbose: bo
             print(f"{ts()} {color('[can]', '36')} #{frame_count:5d} ID={id_str} DLC={len(msg.data)} DATA={data_hex} -> {clients} client(s)")
 
 
-def client_handler_thread(sock: socket.socket, addr: tuple[str, int], client_manager: ClientManager):
-    """Handle a single client connection (just keep it alive)."""
-    client_manager.add_client(sock, addr)
-
-    try:
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        while True:
-            data = sock.recv(1024)
-            if not data:
-                break
-    except (OSError, ConnectionResetError):
-        pass
-    finally:
-        client_manager.remove_client(sock)
-
-
-def tcp_server_thread(port: int, client_manager: ClientManager):
-    """TCP server that accepts client connections."""
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(("0.0.0.0", port))
-    server.listen(5)
-
-    print(f"{ts()} {color('[server]', '32')} TCP server listening on port {port}")
-
-    while True:
-        try:
-            client_sock, addr = server.accept()
-            t = threading.Thread(
-                target=client_handler_thread,
-                args=(client_sock, addr, client_manager),
-                daemon=True
-            )
-            t.start()
-        except Exception as e:
-            print(f"{ts()} {color('[server]', '31')} Accept error: {e}")
 
 
 def main():
@@ -542,7 +409,7 @@ def main():
 
     server_thread = threading.Thread(
         target=tcp_server_thread,
-        args=(listen_port, client_manager),
+        args=(listen_port, client_manager, None),
         daemon=True
     )
     server_thread.start()
