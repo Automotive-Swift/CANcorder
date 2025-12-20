@@ -51,6 +51,9 @@ pip3 install gs_usb
 
 # For serial/SLCAN support
 pip3 install pyserial
+
+# Zeroconf service discovery (optional but recommended)
+pip3 install zeroconf
 ```
 
 **For rusoku_canlogger.py:**
@@ -61,6 +64,9 @@ cd RusokuCAN.dylib
 ./build_no.sh
 make all
 sudo make install
+
+# Zeroconf service discovery (optional but recommended)
+pip3 install zeroconf
 ```
 
 ### 2. Set Up Your CAN Interface
@@ -95,6 +101,22 @@ python3 utils/rusoku_canlogger.py --channel 0
    - **Host**: `localhost` (or the machine's IP if remote)
    - **Port**: `2518` (default, or whatever you specified with `--port`)
 4. **Click Connect** - CANcorder will now receive real-time CAN frames
+
+## Zeroconf Service Discovery
+
+Both `canlogger.py` and `rusoku_canlogger.py` advertise their TCP service via Zeroconf/mDNS (service type `_ecuconnect-log._tcp.local.`) when the [`zeroconf`](https://pypi.org/project/zeroconf/) package is installed.
+
+- Default instance name: `ECUconnect-Logger <hostname>:<port>` (contains the required `ECUconnect-Logger` prefix).
+- Override with `--service-name "ECUconnect-Logger My TouCAN"` or disable with `--no-zeroconf`.
+- TXT records expose metadata for richer client pickers:
+  - `system`: hostname running the proxy
+  - `process`: `canlogger.py` or `rusoku_canlogger.py`
+  - `interface`: python-can interface (universal proxy only)
+  - `channel`: interface channel or TouCAN index
+  - `bitrate` / `bitrate_index`: bus speed configuration
+  - `port`: TCP server port
+
+Discover services by running `dns-sd -B _ecuconnect-log._tcp` or any Zeroconf browser on your LAN.
 
 ## Wire Protocol Specification
 

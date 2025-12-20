@@ -24,11 +24,15 @@ import sys
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
+
+from zeroconf_service import LoggerZeroconfService, SERVICE_NAME_PREFIX
 
 HEADER_SIZE = 8 + 4 + 1 + 1  # 14 bytes
 DEFAULT_PORT = 2518
 DEFAULT_BITRATE = 500000
+DEFAULT_INTERFACE = "gs_usb"
 
 HELP_DESCRIPTION = """\
 ECUconnect CAN Logger Simulator
@@ -221,6 +225,10 @@ def color(text: str, code: str) -> str:
     return f"\033[{code}m{text}\033[0m"
 
 
+def zeroconf_log(message: str):
+    print(f"{ts()} {color('[zeroconf]', '35')} {message}")
+
+
 def pack_frame(msg: can.Message) -> bytes:
     """Pack a CAN message into ECUconnect Logger binary format."""
     ts_us = int(time.time() * 1_000_000)
@@ -402,7 +410,7 @@ def main():
     parser.add_argument(
         "--interface", "-i",
         type=str,
-        default="gs_usb",
+        default=DEFAULT_INTERFACE,
         metavar="IFACE",
         help="python-can interface type (default: gs_usb). "
              "Options: gs_usb, socketcan, slcan, pcan, vector, etc."
@@ -429,6 +437,19 @@ def main():
         help="Auto-detect CAN interface. Tries gs_usb, slcan, and socketcan "
              "in sequence until one succeeds."
     )
+    parser.add_argument(
+        "--service-name",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="Custom Zeroconf service name. "
+             "Defaults to 'ECUconnect-Logger <hostname>:<port>'."
+    )
+    parser.add_argument(
+        "--no-zeroconf",
+        action="store_true",
+        help="Disable Zeroconf service advertisement."
+    )
 
     args = parser.parse_args()
 
@@ -452,8 +473,25 @@ def main():
             print(f"{ts()} {color('[can]', '32')} CAN bus opened: {args.interface} ({bus.channel_info})")
         except Exception as e:
             print(f"{ts()} {color('[can]', '31')} Failed to open CAN bus: {e}")
-            print(f"{ts()} {color('[can]', '33')} Trying auto-detection...")
-            bus = find_any_can_device(args.bitrate)
+            channel_input = args.channel if isinstance(args.channel, str) else str(args.channel)
+            prefer_socketcan = (
+                args.interface == DEFAULT_INTERFACE
+                and channel_input.lower().startswith(("can", "vcan"))
+            )
+            if prefer_socketcan:
+                print(f"{ts()} {color('[can]', '34')} Retrying with socketcan interface on channel {channel_input}...")
+                try:
+                    bus = can.Bus(
+                        interface="socketcan",
+                        channel=channel_input,
+                        bitrate=args.bitrate
+                    )
+                    print(f"{ts()} {color('[can]', '32')} CAN bus opened: socketcan ({bus.channel_info})")
+                except Exception as sock_err:
+                    print(f"{ts()} {color('[can]', '31')} SocketCAN retry failed: {sock_err}")
+            if bus is None:
+                print(f"{ts()} {color('[can]', '33')} Trying auto-detection...")
+                bus = find_any_can_device(args.bitrate)
 
     if bus is None:
         print(f"{ts()} {color('[error]', '31')} No CAN device found!")
@@ -486,6 +524,25 @@ def main():
     print(f"{ts()} {color('[ready]', '32')} Simulator ready. Clients can connect to port {args.port}")
     print(f"{ts()} {color('[ready]', '32')} Press Ctrl+C to stop")
 
+    zeroconf_service = None
+    if not args.no_zeroconf:
+        default_name = args.service_name or f"{SERVICE_NAME_PREFIX} {socket.gethostname()}:{args.port}"
+        metadata = {
+            "system": socket.gethostname(),
+            "process": Path(__file__).name,
+            "interface": args.interface,
+            "channel": args.channel,
+            "bitrate": str(args.bitrate),
+            "port": str(args.port),
+        }
+        zeroconf_service = LoggerZeroconfService(
+            port=args.port,
+            service_name=default_name,
+            properties=metadata,
+            logger=zeroconf_log,
+        )
+        zeroconf_service.start()
+
     try:
         while True:
             time.sleep(1)
@@ -493,8 +550,11 @@ def main():
         print(f"\n{ts()} {color('[exit]', '33')} Shutting down...")
         stats = client_manager.stats
         print(f"{ts()} {color('[stats]', '34')} Frames sent: {stats['frames_sent']}, dropped: {stats['frames_dropped']}, bytes: {stats['bytes_sent']}")
+    finally:
+        if zeroconf_service:
+            zeroconf_service.stop()
 
-    bus.shutdown()
+        bus.shutdown()
     return 0
 
 

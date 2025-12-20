@@ -24,9 +24,12 @@ import threading
 import time
 from ctypes import *
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 import platform
 import signal
+
+from zeroconf_service import LoggerZeroconfService, SERVICE_NAME_PREFIX
 
 HEADER_SIZE = 8 + 4 + 1 + 1  # 14 bytes
 DEFAULT_PORT = 2518
@@ -339,6 +342,10 @@ def color(text: str, code: str) -> str:
     return f"\033[{code}m{text}\033[0m"
 
 
+def zeroconf_log(message: str):
+    print(f"{ts()} {color('[zeroconf]', '35')} {message}")
+
+
 def pack_frame(msg: Message) -> bytes:
     """Pack a CAN message into ECUconnect Logger binary format."""
     ts_us = int(time.time() * 1_000_000)
@@ -535,6 +542,19 @@ def main():
         help="Print each received CAN frame to stdout. "
              "Useful for debugging but may impact performance at high bus loads."
     )
+    parser.add_argument(
+        "--service-name",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="Custom Zeroconf service name. "
+             "Defaults to 'ECUconnect-Logger <hostname>:<port>'."
+    )
+    parser.add_argument(
+        "--no-zeroconf",
+        action="store_true",
+        help="Disable Zeroconf service advertisement."
+    )
 
     args = parser.parse_args()
 
@@ -603,6 +623,24 @@ def main():
     print(f"{ts()} {color('[ready]', '32')} Simulator ready. Clients can connect to port {args.port}")
     print(f"{ts()} {color('[ready]', '32')} Press Ctrl+C to stop")
 
+    zeroconf_service = None
+    if not args.no_zeroconf:
+        default_name = args.service_name or f"{SERVICE_NAME_PREFIX} {socket.gethostname()}:{args.port}"
+        metadata = {
+            "system": socket.gethostname(),
+            "process": Path(__file__).name,
+            "channel": str(args.channel),
+            "bitrate_index": str(args.bitrate_index),
+            "port": str(args.port),
+        }
+        zeroconf_service = LoggerZeroconfService(
+            port=args.port,
+            service_name=default_name,
+            properties=metadata,
+            logger=zeroconf_log,
+        )
+        zeroconf_service.start()
+
     try:
         while not stop_event.is_set():
             time.sleep(0.5)
@@ -614,6 +652,9 @@ def main():
 
     stats = client_manager.stats
     print(f"{ts()} {color('[stats]', '34')} Frames sent: {stats['frames_sent']}, dropped: {stats['frames_dropped']}, bytes: {stats['bytes_sent']}")
+
+    if zeroconf_service:
+        zeroconf_service.stop()
 
     can.reset()
     can.exit()
