@@ -49,6 +49,9 @@ simulates a typical ECU reprogramming/flashing session. The simulated session
 follows a realistic diagnostic sequence including identification, security
 access, memory operations, data transfer, and ECU reset.
 
+By default runs in sync mode where UDS sessions only start when a client
+connects. Use --async for free-running mode where sessions generate continuously.
+
 Use this to test diagnostic applications without needing real CAN hardware
 or an actual ECU.
 """
@@ -189,8 +192,11 @@ The simulator uses realistic timings:
 EXAMPLES
 ========
 
-Basic usage:
+Basic usage (sync mode - waits for client):
   python3 %(prog)s
+
+Async mode (free-running):
+  python3 %(prog)s --async
 
 With verbose output:
   python3 %(prog)s -v
@@ -1431,13 +1437,24 @@ def uds_generator_thread(
     client_manager: ClientManager,
     stop_event: threading.Event,
     loop: bool,
-    verbose: bool
+    verbose: bool,
+    sync_mode: bool
 ):
     """Thread that generates UDS and OBD-II frames and broadcasts to clients."""
     frame_count = 0
     session_count = 0
 
     while not stop_event.is_set():
+        # In sync mode, wait for at least one client before generating
+        if sync_mode:
+            while not stop_event.is_set() and client_manager.client_count() == 0:
+                time.sleep(0.1)
+            
+            if stop_event.is_set():
+                break
+                
+            print(f"{ts()} {color('[sync]', '35')} Client connected, starting UDS session...")
+
         session_count += 1
         print(f"{ts()} {color('[uds]', '32')} Starting UDS session #{session_count}")
 
@@ -1454,6 +1471,11 @@ def uds_generator_thread(
 
         if stop_event.is_set():
             break
+
+        # Check if we should continue (in sync mode, stop if no clients)
+        if sync_mode and client_manager.client_count() == 0:
+            print(f"{ts()} {color('[sync]', '35')} No clients connected, pausing generation...")
+            continue
 
         # Generate OBD-II traffic between sessions
         obd_cycles = random.randint(15, 30)
@@ -1474,6 +1496,9 @@ def uds_generator_thread(
 
         for _ in range(int(restart_delay * 10)):
             if stop_event.is_set():
+                break
+            # In sync mode, also check if clients disconnected during delay
+            if sync_mode and client_manager.client_count() == 0:
                 break
             time.sleep(0.1)
 
@@ -1537,6 +1562,12 @@ def main():
         action="store_true",
         help="Disable Zeroconf service advertisement."
     )
+    parser.add_argument(
+        "--async",
+        action="store_true",
+        help="Run in async mode (free-running). Default is sync mode where "
+             "UDS sessions only start when a client connects."
+    )
 
     args = parser.parse_args()
 
@@ -1552,10 +1583,13 @@ def main():
 
     port_label = f"{listen_port}" if requested_port is not None else f"{listen_port} (auto)"
 
+    sync_mode = not args.async
+
     print(f"{ts()} {color('[init]', '34')} Mock UDS-on-CAN Logger starting...")
     print(f"{ts()} {color('[init]', '34')} TCP port: {port_label}")
     print(f"{ts()} {color('[init]', '34')} Tester ID: 0x{args.tester_id:03X}, ECU ID: 0x{args.ecu_id:03X}")
     print(f"{ts()} {color('[init]', '34')} Speed: {args.speed}x, Loop: {not args.no_loop}")
+    print(f"{ts()} {color('[init]', '34')} Mode: {'sync' if sync_mode else 'async'}")
 
     client_manager = ClientManager()
     stop_event = threading.Event()
@@ -1581,17 +1615,23 @@ def main():
 
     uds_thread = threading.Thread(
         target=uds_generator_thread,
-        args=(session, obd_sim, client_manager, stop_event, not args.no_loop, args.verbose),
+        args=(session, obd_sim, client_manager, stop_event, not args.no_loop, args.verbose, sync_mode),
         daemon=True
     )
     uds_thread.start()
 
     print(f"{ts()} {color('[ready]', '32')} Simulator ready. Clients can connect to port {listen_port}")
+    if sync_mode:
+        print(f"{ts()} {color('[ready]', '32')} Running in sync mode - UDS sessions will start when a client connects")
+    else:
+        print(f"{ts()} {color('[ready]', '32')} Running in async mode - UDS sessions are running continuously")
     print(f"{ts()} {color('[ready]', '32')} Press Ctrl+C to stop")
 
     zeroconf_service = None
     if not args.no_zeroconf:
-        default_name = args.service_name or f"{SERVICE_NAME_PREFIX} Mock-UDS {socket.gethostname()}:{listen_port}"
+        # Use short hostname to avoid "Too long" errors with FQDNs
+        hostname = socket.gethostname().split('.')[0]
+        default_name = args.service_name or f"{SERVICE_NAME_PREFIX} Mock-UDS {hostname}:{listen_port}"
         metadata = {
             "process": Path(__file__).name,
             "interface": "mock-uds",
