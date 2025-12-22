@@ -57,12 +57,44 @@ sudo ip link add vcan0 type vcan
 sudo ip link set vcan0 up
 python3 utils/canlogger.py --interface socketcan --channel vcan0
 
+# Mock UDS traffic (no hardware required)
+python3 utils/mock_uds_canlogger.py -v
+
 # Monitor raw protocol output
 nc localhost <PORT> | xxd
 
 # Test service discovery
 dns-sd -B _ecuconnect-log._tcp
 ```
+
+### Mock UDS Simulator
+
+The `mock_uds_canlogger.py` generates synthetic automotive diagnostic traffic for testing without hardware:
+
+```bash
+# Basic usage - continuous UDS reprogramming sessions with OBD-II polling
+python3 utils/mock_uds_canlogger.py
+
+# Verbose with faster timing
+python3 utils/mock_uds_canlogger.py -v --speed 2.0
+
+# Single session
+python3 utils/mock_uds_canlogger.py --no-loop
+```
+
+**Simulated UDS Services:**
+- 0x10 DiagnosticSessionControl, 0x27 SecurityAccess, 0x22 ReadDataByIdentifier
+- 0x19 ReadDTCInformation, 0x14 ClearDTC, 0x31 RoutineControl
+- 0x34 RequestDownload, 0x36 TransferData, 0x37 RequestTransferExit
+- 0x11 ECUReset, 0x28 CommunicationControl, 0x85 ControlDTCSetting
+
+**Simulated OBD-II Services:**
+- Service 01 (current data): RPM, speed, temps, throttle, fuel level
+- Service 03 (stored DTCs), Service 07 (pending DTCs)
+
+**Error Simulation:**
+- NRC 0x21 (Busy), 0x22 (Conditions Not Correct), 0x35 (Invalid Key)
+- NRC 0x71-0x73 (Transfer errors) with automatic retries
 
 ## Architecture Overview
 
@@ -82,6 +114,7 @@ Total: 14 + dlc bytes per frame
 utils/
 ├── canlogger.py            # Universal adapter using python-can
 ├── rusoku_canlogger.py     # Native Rusoku TouCAN adapter
+├── mock_uds_canlogger.py   # UDS/OBD-II traffic simulator (no hardware required)
 ├── canlogger_common.py     # Shared protocol implementation and TCP server
 └── zeroconf_service.py     # mDNS service advertisement
 ```

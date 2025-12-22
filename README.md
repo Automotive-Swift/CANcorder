@@ -38,6 +38,28 @@ A specialized proxy for Rusoku TouCAN USB adapters on macOS using the native Mac
 **Platform Support:**
 - **macOS** with MacCAN-TouCAN library
 
+### `mock_uds_canlogger.py` - UDS Simulator
+
+A mock CAN logger that generates synthetic UDS (Unified Diagnostic Services) over CAN traffic simulating ECU reprogramming sessions. Useful for testing diagnostic applications without real CAN hardware.
+
+**Simulated Operations:**
+- Complete ECU reprogramming sequence (identification, security access, memory erase, data transfer, reset)
+- Realistic DTC (Diagnostic Trouble Code) reading and clearing
+- OBD-II polling traffic between sessions
+- Negative responses with automatic retries (busy, invalid key, transfer errors)
+
+**Usage:**
+```bash
+# Basic usage
+python3 utils/mock_uds_canlogger.py
+
+# With verbose output and faster timing
+python3 utils/mock_uds_canlogger.py -v --speed 2.0
+
+# Single session (no loop)
+python3 utils/mock_uds_canlogger.py --no-loop
+```
+
 ## Quick Start
 
 ### 1. Install Dependencies
@@ -250,7 +272,7 @@ Configure multiple connections in CANcorder to capture from both buses.
 # 1000 kbit/s
 python3 utils/rusoku_canlogger.py --bitrate 1000000
 
-# 250 kbit/s  
+# 250 kbit/s
 python3 utils/rusoku_canlogger.py --bitrate 250000
 
 # 125 kbit/s
@@ -262,6 +284,25 @@ python3 utils/rusoku_canlogger.py --bitrate 125000
 python3 utils/rusoku_canlogger.py --channel 0 --port 42422 &
 python3 utils/rusoku_canlogger.py --channel 1 --port 42423 &
 ```
+
+### Mock UDS Simulator
+
+**Test diagnostic applications without hardware:**
+```bash
+# Generate UDS reprogramming traffic
+python3 utils/mock_uds_canlogger.py -v
+
+# Speed up simulation (2x faster)
+python3 utils/mock_uds_canlogger.py --speed 2.0
+
+# Custom ECU IDs
+python3 utils/mock_uds_canlogger.py --tester-id 0x7E2 --ecu-id 0x7EA
+```
+
+The simulator generates:
+- **UDS Services**: DiagnosticSessionControl (0x10), SecurityAccess (0x27), ReadDTCInformation (0x19), TransferData (0x36), ECUReset (0x11), and more
+- **OBD-II Polling**: Service 01 (live data), Service 03 (stored DTCs), Service 07 (pending DTCs)
+- **Error Conditions**: Busy responses (0x21), invalid keys (0x35), transfer errors (0x71-0x73) with automatic retries
 
 ## Implementing Custom Logger Backends
 

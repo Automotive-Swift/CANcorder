@@ -142,12 +142,43 @@ polling traffic to simulate a scan tool monitoring vehicle data:
   Simulates realistic sensor value fluctuations during "driving".
 
 
+ERROR SIMULATION
+================
+
+The simulator occasionally generates negative responses with retries:
+
+  0x21  Busy - Repeat Request
+        - ECU temporarily busy, tester retries after short delay
+        - ~3%% probability on session control requests
+
+  0x22  Conditions Not Correct
+        - Programming preconditions not met (e.g., engine running)
+        - ~2%% probability, followed by retry after delay
+
+  0x35  Invalid Key
+        - Security access key calculation error
+        - ~15%% probability on first attempt, then successful retry
+
+  0x71  Transfer Data Suspended
+        - Temporary flash write issue
+        - ~2%% probability during data transfer, block retried
+
+  0x72  General Programming Failure
+        - Flash memory write error
+        - Block retried after error
+
+  0x73  Wrong Block Sequence Counter
+        - Block sequence mismatch
+        - Correct block sent on retry
+
+
 TIMING SIMULATION
 =================
 
 The simulator uses realistic timings:
   - Normal response: 10-50ms
   - Security access: 100-300ms (seed generation)
+  - Security retry delay: 500-1000ms after invalid key
   - Memory erase: 500ms-2s with 0x78 pending responses
   - Data transfer: ~20ms per block
   - OBD-II polling: ~100ms per cycle (5-10 Hz)
@@ -246,8 +277,25 @@ SIMULATED_DTCS = [
 ]
 SID_CONTROL_DTC_SETTING = 0x85
 
-# Negative Response
+# Negative Response Codes (NRCs)
+NRC_GENERAL_REJECT = 0x10
+NRC_SERVICE_NOT_SUPPORTED = 0x11
+NRC_SUBFUNCTION_NOT_SUPPORTED = 0x12
+NRC_INCORRECT_MESSAGE_LENGTH = 0x13
+NRC_BUSY_REPEAT_REQUEST = 0x21
+NRC_CONDITIONS_NOT_CORRECT = 0x22
+NRC_REQUEST_SEQUENCE_ERROR = 0x24
+NRC_REQUEST_OUT_OF_RANGE = 0x31
+NRC_SECURITY_ACCESS_DENIED = 0x33
+NRC_INVALID_KEY = 0x35
+NRC_EXCEEDED_NUMBER_OF_ATTEMPTS = 0x36
+NRC_REQUIRED_TIME_DELAY = 0x37
+NRC_UPLOAD_DOWNLOAD_NOT_ACCEPTED = 0x70
+NRC_TRANSFER_DATA_SUSPENDED = 0x71
+NRC_GENERAL_PROGRAMMING_FAILURE = 0x72
+NRC_WRONG_BLOCK_SEQUENCE = 0x73
 NRC_RESPONSE_PENDING = 0x78
+NRC_SERVICE_NOT_SUPPORTED_IN_SESSION = 0x7F
 
 
 def make_single_frame(data: bytes) -> bytes:
@@ -290,6 +338,13 @@ def negative_response(sid: int, nrc: int) -> bytes:
 class UDSSession:
     """Generates a realistic UDS reprogramming session sequence."""
 
+    # Probability of various error conditions (0.0 - 1.0)
+    ERROR_RATE_BUSY = 0.03           # ECU busy, repeat request
+    ERROR_RATE_CONDITIONS = 0.02     # Conditions not correct
+    ERROR_RATE_SECURITY_FAIL = 0.15  # First security attempt fails
+    ERROR_RATE_TRANSFER_ERROR = 0.02 # Transfer data errors
+    ERROR_RATE_SEQUENCE_ERROR = 0.01 # Wrong block sequence
+
     def __init__(
         self,
         tester_id: int = 0x7E0,
@@ -303,6 +358,7 @@ class UDSSession:
         self.verbose = verbose
         self.block_counter = 0
         self._reset_dtcs()
+        self._security_attempts = 0
 
     def _reset_dtcs(self):
         """Reset DTCs to initial simulated state."""
@@ -403,14 +459,25 @@ class UDSSession:
         return frames
 
     def _diagnostic_session_control(self, session_type: int) -> List[Tuple[int, bytes, float]]:
-        """Generate Diagnostic Session Control exchange."""
+        """Generate Diagnostic Session Control exchange with possible retry."""
         frames = []
 
-        # Request
         req = make_single_frame(bytes([SID_DIAGNOSTIC_SESSION_CONTROL, session_type]))
-        frames.append((self.tester_id, req, random.uniform(20, 50)))
 
-        # Response
+        # Occasionally simulate "busy" response requiring retry
+        if random.random() < self.ERROR_RATE_BUSY:
+            frames.append((self.tester_id, req, random.uniform(20, 50)))
+            # Negative response: busy, repeat request
+            nrc = negative_response(SID_DIAGNOSTIC_SESSION_CONTROL, NRC_BUSY_REPEAT_REQUEST)
+            frames.append((self.ecu_id, nrc, random.uniform(15, 30)))
+            self.log("ECU busy, retrying session control...")
+            # Retry after delay
+            frames.append((self.tester_id, req, random.uniform(100, 200)))
+
+        else:
+            frames.append((self.tester_id, req, random.uniform(20, 50)))
+
+        # Positive response
         resp = make_single_frame(bytes([
             positive_response(SID_DIAGNOSTIC_SESSION_CONTROL),
             session_type,
@@ -467,26 +534,57 @@ class UDSSession:
         return frames
 
     def _security_access(self) -> List[Tuple[int, bytes, float]]:
-        """Generate Security Access exchange (seed & key)."""
+        """Generate Security Access exchange (seed & key) with possible failed attempt."""
         frames = []
         security_level = 0x11  # Programming security level
 
-        # Request seed
-        req = make_single_frame(bytes([SID_SECURITY_ACCESS, security_level]))
-        frames.append((self.tester_id, req, random.uniform(20, 40)))
+        # Simulate failed first attempt occasionally
+        simulate_failure = random.random() < self.ERROR_RATE_SECURITY_FAIL
 
-        # Response with seed (simulated 4-byte seed)
+        if simulate_failure:
+            self.log("Simulating failed security access attempt...")
+
+            # First attempt: Request seed
+            req_seed = make_single_frame(bytes([SID_SECURITY_ACCESS, security_level]))
+            frames.append((self.tester_id, req_seed, random.uniform(20, 40)))
+
+            # Response with seed
+            seed1 = bytes([random.randint(0, 255) for _ in range(4)])
+            resp_seed = make_single_frame(bytes([
+                positive_response(SID_SECURITY_ACCESS),
+                security_level
+            ]) + seed1)
+            frames.append((self.ecu_id, resp_seed, random.uniform(100, 200)))
+
+            # Send WRONG key (simulating calculation error)
+            wrong_key = bytes([random.randint(0, 255) for _ in range(4)])
+            req_key = make_single_frame(bytes([SID_SECURITY_ACCESS, security_level + 1]) + wrong_key)
+            frames.append((self.tester_id, req_key, random.uniform(50, 100)))
+
+            # Negative response: Invalid key
+            nrc = negative_response(SID_SECURITY_ACCESS, NRC_INVALID_KEY)
+            frames.append((self.ecu_id, nrc, random.uniform(30, 80)))
+            self.log("Security access failed (invalid key), retrying...")
+
+            # Wait before retry (required time delay)
+            frames.append((0, b'', random.uniform(500, 1000)))  # Delay marker
+
+        # Successful attempt: Request seed
+        req_seed = make_single_frame(bytes([SID_SECURITY_ACCESS, security_level]))
+        frames.append((self.tester_id, req_seed, random.uniform(20, 40)))
+
+        # Response with seed
         seed = bytes([random.randint(0, 255) for _ in range(4)])
-        resp = make_single_frame(bytes([
+        resp_seed = make_single_frame(bytes([
             positive_response(SID_SECURITY_ACCESS),
             security_level
         ]) + seed)
-        frames.append((self.ecu_id, resp, random.uniform(100, 250)))
+        frames.append((self.ecu_id, resp_seed, random.uniform(100, 250)))
 
-        # Send key
-        key = bytes([(b ^ 0xCA) & 0xFF for b in seed])  # Simple XOR "algorithm"
-        req = make_single_frame(bytes([SID_SECURITY_ACCESS, security_level + 1]) + key)
-        frames.append((self.tester_id, req, random.uniform(50, 100)))
+        # Send correct key
+        key = bytes([(b ^ 0xCA) & 0xFF for b in seed])
+        req_key = make_single_frame(bytes([SID_SECURITY_ACCESS, security_level + 1]) + key)
+        frames.append((self.tester_id, req_key, random.uniform(50, 100)))
 
         # Key accepted
         resp = make_single_frame(bytes([
@@ -534,7 +632,7 @@ class UDSSession:
         return frames
 
     def _routine_control_check_preconditions(self) -> List[Tuple[int, bytes, float]]:
-        """Generate Routine Control - Check Programming Preconditions."""
+        """Generate Routine Control - Check Programming Preconditions with possible retry."""
         frames = []
         routine_id = 0xFF00  # Check programming preconditions
 
@@ -544,7 +642,22 @@ class UDSSession:
             (routine_id >> 8) & 0xFF,
             routine_id & 0xFF
         ]))
-        frames.append((self.tester_id, req, random.uniform(30, 60)))
+
+        # Occasionally fail with "conditions not correct" (e.g., engine running)
+        if random.random() < self.ERROR_RATE_CONDITIONS:
+            frames.append((self.tester_id, req, random.uniform(30, 60)))
+
+            nrc = negative_response(SID_ROUTINE_CONTROL, NRC_CONDITIONS_NOT_CORRECT)
+            frames.append((self.ecu_id, nrc, random.uniform(20, 50)))
+            self.log("Preconditions not met, waiting and retrying...")
+
+            # Wait for conditions to be met
+            frames.append((0, b'', random.uniform(300, 600)))
+
+            # Retry
+            frames.append((self.tester_id, req, random.uniform(30, 60)))
+        else:
+            frames.append((self.tester_id, req, random.uniform(30, 60)))
 
         resp = make_single_frame(bytes([
             positive_response(SID_ROUTINE_CONTROL),
@@ -646,8 +759,9 @@ class UDSSession:
         return frames
 
     def _transfer_data_blocks(self, num_blocks: int) -> List[Tuple[int, bytes, float]]:
-        """Generate Transfer Data exchanges for multiple blocks."""
+        """Generate Transfer Data exchanges for multiple blocks with possible errors."""
         frames = []
+        error_injected = False  # Only inject one error per session
 
         for i in range(num_blocks):
             self.block_counter = (self.block_counter + 1) & 0xFF
@@ -655,7 +769,81 @@ class UDSSession:
             # Generate random "firmware" data
             block_data = bytes([random.randint(0, 255) for _ in range(random.randint(200, 256))])
 
-            # Request (multi-frame transfer)
+            # Occasionally inject a transfer error (once per session)
+            inject_error = (
+                not error_injected
+                and i > 5  # Not on first few blocks
+                and random.random() < self.ERROR_RATE_TRANSFER_ERROR
+            )
+
+            if inject_error:
+                error_injected = True
+                error_type = random.choice(['sequence', 'programming', 'suspended'])
+
+                if error_type == 'sequence':
+                    # Wrong block sequence counter error
+                    self.log(f"Simulating wrong block sequence at block {i}...")
+                    wrong_counter = (self.block_counter + random.randint(1, 5)) & 0xFF
+
+                    req_data = bytes([SID_TRANSFER_DATA, wrong_counter]) + block_data
+                    frames.append((self.tester_id, make_first_frame(len(req_data), req_data), random.uniform(15, 30)))
+                    frames.append((self.ecu_id, make_flow_control(0, 5), random.uniform(3, 8)))
+
+                    remaining = req_data[6:]
+                    seq = 1
+                    while remaining:
+                        cf = make_consecutive_frame(seq, remaining[:7])
+                        frames.append((self.tester_id, cf, random.uniform(3, 8)))
+                        remaining = remaining[7:]
+                        seq = (seq + 1) & 0x0F
+
+                    # Negative response: wrong block sequence
+                    nrc = negative_response(SID_TRANSFER_DATA, NRC_WRONG_BLOCK_SEQUENCE)
+                    frames.append((self.ecu_id, nrc, random.uniform(20, 50)))
+
+                elif error_type == 'programming':
+                    # General programming failure (flash write error)
+                    self.log(f"Simulating programming failure at block {i}...")
+
+                    req_data = bytes([SID_TRANSFER_DATA, self.block_counter]) + block_data
+                    frames.append((self.tester_id, make_first_frame(len(req_data), req_data), random.uniform(15, 30)))
+                    frames.append((self.ecu_id, make_flow_control(0, 5), random.uniform(3, 8)))
+
+                    remaining = req_data[6:]
+                    seq = 1
+                    while remaining:
+                        cf = make_consecutive_frame(seq, remaining[:7])
+                        frames.append((self.tester_id, cf, random.uniform(3, 8)))
+                        remaining = remaining[7:]
+                        seq = (seq + 1) & 0x0F
+
+                    # Negative response followed by pending, then success (flash retry)
+                    nrc = negative_response(SID_TRANSFER_DATA, NRC_GENERAL_PROGRAMMING_FAILURE)
+                    frames.append((self.ecu_id, nrc, random.uniform(50, 100)))
+
+                else:  # suspended
+                    # Transfer suspended temporarily
+                    self.log(f"Simulating transfer suspended at block {i}...")
+
+                    req_data = bytes([SID_TRANSFER_DATA, self.block_counter]) + block_data
+                    frames.append((self.tester_id, make_first_frame(len(req_data), req_data), random.uniform(15, 30)))
+                    frames.append((self.ecu_id, make_flow_control(0, 5), random.uniform(3, 8)))
+
+                    remaining = req_data[6:]
+                    seq = 1
+                    while remaining:
+                        cf = make_consecutive_frame(seq, remaining[:7])
+                        frames.append((self.tester_id, cf, random.uniform(3, 8)))
+                        remaining = remaining[7:]
+                        seq = (seq + 1) & 0x0F
+
+                    nrc = negative_response(SID_TRANSFER_DATA, NRC_TRANSFER_DATA_SUSPENDED)
+                    frames.append((self.ecu_id, nrc, random.uniform(30, 60)))
+
+                # Retry the block
+                self.log("Retrying block transfer...")
+
+            # Normal or retry transfer
             req_data = bytes([SID_TRANSFER_DATA, self.block_counter]) + block_data
 
             # First frame
