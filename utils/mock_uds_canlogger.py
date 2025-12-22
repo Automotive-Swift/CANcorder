@@ -207,7 +207,7 @@ Custom ECU IDs (e.g., for powertrain ECU):
 Faster simulation (half timing):
   python3 %(prog)s --speed 2.0
 
-Single session (no loop):
+Single session per client:
   python3 %(prog)s --no-loop
 
 
@@ -1466,8 +1466,15 @@ def uds_generator_thread(
         )
 
         if not loop:
-            print(f"{ts()} {color('[uds]', '32')} Session complete. Exiting (--no-loop).")
-            break
+            print(f"{ts()} {color('[uds]', '32')} Session complete. Waiting for next client connection...")
+            
+            # In sync mode with no-loop, wait for current client to disconnect
+            if sync_mode and client_manager.client_count() > 0:
+                print(f"{ts()} {color('[sync]', '35')} Waiting for current client to disconnect...")
+                while not stop_event.is_set() and client_manager.client_count() > 0:
+                    time.sleep(0.1)
+                    
+            continue
 
         if stop_event.is_set():
             break
@@ -1548,7 +1555,7 @@ def main():
     parser.add_argument(
         "--no-loop",
         action="store_true",
-        help="Run single session and exit instead of looping."
+        help="Run single session per client connection instead of continuous looping."
     )
     parser.add_argument(
         "--service-name",
@@ -1564,6 +1571,7 @@ def main():
     )
     parser.add_argument(
         "--async",
+        dest="async_mode",
         action="store_true",
         help="Run in async mode (free-running). Default is sync mode where "
              "UDS sessions only start when a client connects."
@@ -1583,7 +1591,7 @@ def main():
 
     port_label = f"{listen_port}" if requested_port is not None else f"{listen_port} (auto)"
 
-    sync_mode = not args.async
+    sync_mode = not args.async_mode
 
     print(f"{ts()} {color('[init]', '34')} Mock UDS-on-CAN Logger starting...")
     print(f"{ts()} {color('[init]', '34')} TCP port: {port_label}")
@@ -1649,8 +1657,6 @@ def main():
     try:
         while True:
             time.sleep(0.5)
-            if not uds_thread.is_alive() and args.no_loop:
-                break
     except KeyboardInterrupt:
         print(f"\n{ts()} {color('[exit]', '33')} Shutting down...")
         stop_event.set()
