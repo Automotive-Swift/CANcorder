@@ -112,6 +112,13 @@ class ClientManager:
         with self.lock:
             return len(self.clients)
 
+    def close_all(self):
+        """Close and remove all client sockets."""
+        with self.lock:
+            clients = list(self.clients.keys())
+        for sock in clients:
+            self.remove_client(sock)
+
 
 def client_handler_thread(sock: socket.socket, addr: Tuple[str, int], client_manager: ClientManager):
     """Handle a single client connection (just keep it alive)."""
