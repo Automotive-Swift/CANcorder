@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cancorder-utils"
-version = "0.1.0"
+version = "0.1.1"
 description = "CANcorder ECUconnect logger utilities and protocol helpers."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,4 +27,3 @@ cancorder-mock-uds-canlogger = "cancorder_utils.mock_uds_canlogger:main"
 
 [tool.setuptools]
 packages = {find = {}}
-
