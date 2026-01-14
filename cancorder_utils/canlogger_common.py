@@ -61,7 +61,7 @@ def pack_frame(timestamp_us: int, can_id: int, is_extended: bool, data: bytes) -
 class ClientManager:
     """Manages connected TCP clients and broadcasts frames to all of them."""
 
-    def __init__(self):
+    def __init__(self, logger: Optional[Any] = None):
         self.clients: Dict[socket.socket, Tuple[str, int]] = {}
         self.lock = threading.Lock()
         self.stats = {
@@ -69,17 +69,24 @@ class ClientManager:
             "frames_dropped": 0,
             "bytes_sent": 0,
         }
+        self._logger = logger
+
+    def _log(self, message: str) -> None:
+        if self._logger is None:
+            print(message)
+        else:
+            self._logger(message)
 
     def add_client(self, sock: socket.socket, addr: Tuple[str, int]):
         with self.lock:
             self.clients[sock] = addr
-            print(f"{ts()} {color('[server]', '34')} Client connected: {addr[0]}:{addr[1]} (total: {len(self.clients)})")
+            self._log(f"{ts()} {color('[server]', '34')} Client connected: {addr[0]}:{addr[1]} (total: {len(self.clients)})")
 
     def remove_client(self, sock: socket.socket):
         with self.lock:
             if sock in self.clients:
                 addr = self.clients.pop(sock)
-                print(f"{ts()} {color('[server]', '33')} Client disconnected: {addr[0]}:{addr[1]} (total: {len(self.clients)})")
+                self._log(f"{ts()} {color('[server]', '33')} Client disconnected: {addr[0]}:{addr[1]} (total: {len(self.clients)})")
                 try:
                     sock.close()
                 except Exception:

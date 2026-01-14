@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cancorder-utils"
+version = "0.1.0"
+description = "CANcorder ECUconnect logger utilities and protocol helpers."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Mickey Lauer"}]
+
+dependencies = [
+    "python-can>=4.2.2",
+    "zeroconf>=0.132.0",
+]
+
+[project.optional-dependencies]
+gs_usb = ["gs_usb"]
+serial = ["pyserial>=3.5"]
+
+[project.scripts]
+cancorder-canlogger = "cancorder_utils.canlogger:main"
+cancorder-rusoku-canlogger = "cancorder_utils.rusoku_canlogger:main"
+cancorder-mock-uds-canlogger = "cancorder_utils.mock_uds_canlogger:main"
+
+[tool.setuptools]
+packages = {find = {}}
+

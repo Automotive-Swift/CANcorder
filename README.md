@@ -64,18 +64,25 @@ python3 utils/mock_uds_canlogger.py --no-loop
 
 ### 1. Install Dependencies
 
+Install as a package (local checkout):
+```bash
+python3 -m pip install -e .
+```
+
+Optional extras:
+```bash
+python3 -m pip install -e .[gs_usb,serial]
+```
+
 **For canlogger.py:**
 ```bash
-pip3 install python-can
+pip3 install python-can zeroconf
 
 # For gs_usb support (CANable, etc.)
 pip3 install gs_usb
 
 # For serial/SLCAN support
 pip3 install pyserial
-
-# Zeroconf service discovery (optional but recommended)
-pip3 install zeroconf
 ```
 
 **For rusoku_canlogger.py:**
@@ -87,7 +94,7 @@ cd RusokuCAN.dylib
 make all
 sudo make install
 
-# Zeroconf service discovery (optional but recommended)
+# Zeroconf service discovery
 pip3 install zeroconf
 ```
 
@@ -100,18 +107,24 @@ sudo ip link set can0 up type can bitrate 500000
 
 # Run the logger proxy
 python3 utils/canlogger.py --interface socketcan --channel can0
+# or when installed as a package:
+cancorder-canlogger --interface socketcan --channel can0
 ```
 
 **macOS (gs_usb/CANable):**
 ```bash
 # Requires sudo for USB access
 sudo python3 utils/canlogger.py --interface gs_usb --channel 0
+# or:
+sudo cancorder-canlogger --interface gs_usb --channel 0
 ```
 
 **macOS (Rusoku TouCAN):**
 ```bash
 # No sudo required with TouCAN
 python3 utils/rusoku_canlogger.py --channel 0
+# or:
+cancorder-rusoku-canlogger --channel 0
 ```
 
 ### 3. Connect CANcorder

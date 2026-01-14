@@ -111,12 +111,17 @@ Total: 14 + dlc bytes per frame
 
 ### Module Structure
 ```
-utils/
+cancorder_utils/
 ├── canlogger.py            # Universal adapter using python-can
 ├── rusoku_canlogger.py     # Native Rusoku TouCAN adapter
 ├── mock_uds_canlogger.py   # UDS/OBD-II traffic simulator (no hardware required)
 ├── canlogger_common.py     # Shared protocol implementation and TCP server
 └── zeroconf_service.py     # mDNS service advertisement
+
+utils/
+├── canlogger.py            # Wrapper for package entry point
+├── rusoku_canlogger.py     # Wrapper for package entry point
+└── mock_uds_canlogger.py   # Wrapper for package entry point
 ```
 
 ### Threading Model
@@ -134,7 +139,7 @@ utils/
 
 ### Adding New CAN Interface Support
 1. Create a new logger script following the pattern of existing adapters
-2. Import and use `canlogger_common` for protocol implementation
+2. Import and use `cancorder_utils.canlogger_common` for protocol implementation
 3. Implement hardware-specific initialization and frame reading
 4. Call `setup_can_receiver()` with your CAN bus object
 
@@ -162,7 +167,7 @@ When Zeroconf is available, services are advertised as:
 4. Check service discovery with `dns-sd` or `avahi-browse`
 
 ### Code Style
-- Follow existing patterns in canlogger_common.py for consistency
+- Follow existing patterns in `cancorder_utils/canlogger_common.py` for consistency
 - Use descriptive logging with appropriate verbosity levels
 - Handle keyboard interrupts gracefully for clean shutdown
 - Validate CAN hardware availability before starting TCP server
