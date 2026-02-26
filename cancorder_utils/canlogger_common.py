@@ -47,12 +47,24 @@ def zeroconf_log(message: str):
     print(f"{ts()} {color('[zeroconf]', '35')} {message}")
 
 
-def pack_frame(timestamp_us: int, can_id: int, is_extended: bool, data: bytes) -> bytes:
+def pack_frame(
+    timestamp_us: int,
+    can_id: int,
+    is_extended: bool,
+    data: bytes,
+    *,
+    is_fd: bool = False,
+    bitrate_switch: bool = False,
+    error_state_indicator: bool = False,
+) -> bytes:
     """
     Pack a CAN message into ECUconnect Logger binary format.
     
     Format: [timestamp:8][id:4][ext:1][dlc:1][data:0-64]
     """
+    # CAN-FD metadata is accepted for forward compatibility with newer callers.
+    # The ECUconnect Logger binary packet keeps its legacy 14-byte header.
+    _ = (is_fd, bitrate_switch, error_state_indicator)
     ext = 1 if is_extended else 0
     dlc = len(data)
     return struct.pack(">QIBB", timestamp_us, can_id, ext, dlc) + data
