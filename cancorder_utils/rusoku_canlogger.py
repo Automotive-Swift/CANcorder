@@ -6,10 +6,10 @@ A stand-in for the ECUconnect CAN Logger hardware.
 Uses the RusokuCAN/MacCAN-TouCAN library with Rusoku TouCAN USB adapters
 and streams CAN frames via TCP in the ECUconnect Logger binary format.
 
-Packet format: [timestamp:8][id:4][ext:1][dlc:1][data:0-64]
+Packet format: [timestamp:8][id:4][flags:1][dlc:1][data:0-64]
 - timestamp: uint64_t, big-endian, microseconds since epoch
 - id: uint32_t, big-endian
-- ext: uint8_t (0=standard, 1=extended)
+- flags: uint8_t bitfield (bit0=EXT, bit1=FD, bit2=BRS, bit3=ESI)
 - dlc: uint8_t
 - data: 0-64 bytes
 
@@ -318,7 +318,16 @@ class TouCANInterface:
 def pack_frame(msg: Message) -> bytes:
     """Pack a CAN message into ECUconnect Logger binary format."""
     ts_us = int(time.time() * 1_000_000)
-    return _pack_frame(ts_us, msg.id, bool(msg.flags.xtd), bytes(msg.data[:msg.dlc]))
+    is_fd = bool(msg.flags.fdf) or msg.dlc > 8
+    return _pack_frame(
+        ts_us,
+        msg.id,
+        bool(msg.flags.xtd),
+        bytes(msg.data[:msg.dlc]),
+        is_fd=is_fd,
+        bitrate_switch=bool(msg.flags.brs) if is_fd else False,
+        error_state_indicator=bool(msg.flags.esi) if is_fd else False,
+    )
 
 
 

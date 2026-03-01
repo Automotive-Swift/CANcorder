@@ -14,7 +14,7 @@ The simulated session includes:
 - Data transfer simulation
 - ECU reset and DTC clearing
 
-Packet format: [timestamp:8][id:4][ext:1][dlc:1][data:0-64]
+Packet format: [timestamp:8][id:4][flags:1][dlc:1][data:0-64]
 """
 
 import argparse

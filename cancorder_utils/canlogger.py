@@ -6,10 +6,10 @@ A stand-in for the ECUconnect CAN Logger hardware.
 Uses python-can with gs_usb interface (CANable, etc.) to read CAN frames
 and streams them via TCP in the ECUconnect Logger binary format.
 
-Packet format: [timestamp:8][id:4][ext:1][dlc:1][data:0-64]
+Packet format: [timestamp:8][id:4][flags:1][dlc:1][data:0-64]
 - timestamp: uint64_t, big-endian, microseconds since epoch
 - id: uint32_t, big-endian
-- ext: uint8_t (0=standard, 1=extended)
+- flags: uint8_t bitfield (bit0=EXT, bit1=FD, bit2=BRS, bit3=ESI)
 - dlc: uint8_t
 - data: 0-64 bytes
 
@@ -200,7 +200,35 @@ def check_dependencies():
 def pack_frame(msg: can.Message) -> bytes:
     """Pack a CAN message into ECUconnect Logger binary format."""
     ts_us = int(time.time() * 1_000_000)
-    return _pack_frame(ts_us, msg.arbitration_id, msg.is_extended_id, bytes(msg.data))
+    return _pack_frame(
+        ts_us,
+        msg.arbitration_id,
+        msg.is_extended_id,
+        bytes(msg.data),
+        is_fd=bool(getattr(msg, "is_fd", False) or len(msg.data) > 8),
+        bitrate_switch=bool(getattr(msg, "bitrate_switch", False)),
+        error_state_indicator=bool(getattr(msg, "error_state_indicator", False)),
+    )
+
+
+def open_can_bus(interface: str, channel: object, bitrate: int, **extra_kwargs: object) -> can.Bus:
+    """
+    Open CAN bus with FD capability preferred and graceful fallback.
+
+    Some backends reject `fd=True`; retry without it in that case.
+    """
+    kwargs = {
+        "interface": interface,
+        "channel": channel,
+        "bitrate": bitrate,
+        **extra_kwargs,
+    }
+    try:
+        return can.Bus(fd=True, **kwargs)
+    except TypeError:
+        return can.Bus(**kwargs)
+    except Exception:
+        return can.Bus(**kwargs)
 
 
 
@@ -208,7 +236,7 @@ def pack_frame(msg: can.Message) -> bytes:
 def find_gs_usb_device() -> Optional[can.Bus]:
     """Try to find and open a gs_usb device."""
     try:
-        bus = can.Bus(interface="gs_usb", channel=0, bitrate=DEFAULT_BITRATE)
+        bus = open_can_bus("gs_usb", 0, DEFAULT_BITRATE)
         return bus
     except Exception as e:
         print(f"{ts()} {color('[can]', '31')} gs_usb init failed: {e}")
@@ -226,7 +254,9 @@ def find_any_can_device(bitrate: int) -> Optional[Tuple[can.Bus, str]]:
 
     for interface, kwargs in interfaces_to_try:
         try:
-            bus = can.Bus(interface=interface, bitrate=bitrate, **kwargs)
+            channel = kwargs.get("channel")
+            extras = {k: v for k, v in kwargs.items() if k != "channel"}
+            bus = open_can_bus(interface, channel, bitrate, **extras)
             print(f"{ts()} {color('[can]', '32')} Found CAN device: {interface} ({bus.channel_info})")
             return bus, interface
         except Exception:
@@ -362,11 +392,7 @@ def main():
     else:
         try:
             channel = int(args.channel) if args.channel.isdigit() else args.channel
-            bus = can.Bus(
-                interface=args.interface,
-                channel=channel,
-                bitrate=args.bitrate
-            )
+            bus = open_can_bus(args.interface, channel, args.bitrate)
             print(f"{ts()} {color('[can]', '32')} CAN bus opened: {args.interface} ({bus.channel_info})")
         except Exception as e:
             print(f"{ts()} {color('[can]', '31')} Failed to open CAN bus: {e}")
@@ -378,11 +404,7 @@ def main():
             if prefer_socketcan:
                 print(f"{ts()} {color('[can]', '34')} Retrying with socketcan interface on channel {channel_input}...")
                 try:
-                    bus = can.Bus(
-                        interface="socketcan",
-                        channel=channel_input,
-                        bitrate=args.bitrate
-                    )
+                    bus = open_can_bus("socketcan", channel_input, args.bitrate)
                     args.interface = "socketcan"  # Update interface to reflect actual usage
                     print(f"{ts()} {color('[can]', '32')} CAN bus opened: socketcan ({bus.channel_info})")
                 except Exception as sock_err:

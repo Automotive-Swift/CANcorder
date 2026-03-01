@@ -158,9 +158,9 @@ Discover services by running `dns-sd -B _ecuconnect-log._tcp` or any Zeroconf br
 
 The logger proxies implement the ECUconnect Logger TCP binary protocol. Each CAN frame is transmitted as a binary packet:
 
-```
+``` 
 ┌─────────────┬─────────────┬─────────┬─────────┬──────────────────┐
-│ timestamp   │ can_id      │ ext     │ dlc     │ data             │
+│ timestamp   │ can_id      │ flags   │ dlc     │ data             │
 │ 8 bytes     │ 4 bytes     │ 1 byte  │ 1 byte  │ 0-64 bytes       │
 └─────────────┴─────────────┴─────────┴─────────┴──────────────────┘
 ```
@@ -171,11 +171,11 @@ The logger proxies implement the ECUconnect Logger TCP binary protocol. Each CAN
 |-------|--------|------|------|--------|-------------|
 | `timestamp` | 0 | 8 | `uint64_t` | Big | Microseconds since Unix epoch |
 | `can_id` | 8 | 4 | `uint32_t` | Big | CAN arbitration ID |
-| `ext` | 12 | 1 | `uint8_t` | N/A | 0=standard 11-bit ID, 1=extended 29-bit ID |
+| `flags` | 12 | 1 | `uint8_t` | N/A | bit0=EXT, bit1=FD, bit2=BRS, bit3=ESI |
 | `dlc` | 13 | 1 | `uint8_t` | N/A | Data length (0-8 for CAN, 0-64 for CAN-FD) |
 | `data` | 14 | 0-64 | `uint8_t[]` | N/A | Raw CAN payload bytes |
 
-**Total packet size**: 14 + dlc bytes (14-22 bytes for classic CAN)
+**Total packet size**: 14 + dlc bytes (14-22 bytes for classic CAN, up to 78 for CAN-FD)
 
 ### Implementation Examples
 
@@ -184,11 +184,17 @@ The logger proxies implement the ECUconnect Logger TCP binary protocol. Each CAN
 import struct
 import time
 
-def pack_frame(can_id, is_extended, data):
+def pack_frame(can_id, is_extended, data, is_fd=False, bitrate_switch=False, error_state_indicator=False):
     timestamp = int(time.time() * 1_000_000)  # microseconds
-    ext_flag = 1 if is_extended else 0
+    flags = (1 if is_extended else 0)
+    if is_fd:
+        flags |= 1 << 1
+        if bitrate_switch:
+            flags |= 1 << 2
+        if error_state_indicator:
+            flags |= 1 << 3
     dlc = len(data)
-    return struct.pack(">QIBB", timestamp, can_id, ext_flag, dlc) + bytes(data)
+    return struct.pack(">QIBB", timestamp, can_id, flags, dlc) + bytes(data)
 
 # Example: CAN ID 0x123, standard frame, data [0x01, 0x02]
 packet = pack_frame(0x123, False, [0x01, 0x02])
@@ -200,7 +206,7 @@ packet = pack_frame(0x123, False, [0x01, 0x02])
 struct can_frame_header {
     uint64_t timestamp;  // big-endian
     uint32_t can_id;     // big-endian  
-    uint8_t ext;
+    uint8_t flags;
     uint8_t dlc;
 };
 #pragma pack(pop)

@@ -15,6 +15,10 @@ from typing import Any, Dict, Tuple, Optional
 # Protocol constants
 HEADER_SIZE = 8 + 4 + 1 + 1  # 14 bytes
 AUTO_PORT_START = 42420
+FRAME_FLAG_EXTENDED = 1 << 0
+FRAME_FLAG_FD = 1 << 1
+FRAME_FLAG_BRS = 1 << 2
+FRAME_FLAG_ESI = 1 << 3
 
 
 def ts() -> str:
@@ -59,15 +63,19 @@ def pack_frame(
 ) -> bytes:
     """
     Pack a CAN message into ECUconnect Logger binary format.
-    
-    Format: [timestamp:8][id:4][ext:1][dlc:1][data:0-64]
+
+    Format: [timestamp:8][id:4][flags:1][dlc:1][data:0-64]
     """
-    # CAN-FD metadata is accepted for forward compatibility with newer callers.
-    # The ECUconnect Logger binary packet keeps its legacy 14-byte header.
-    _ = (is_fd, bitrate_switch, error_state_indicator)
-    ext = 1 if is_extended else 0
+    flags = FRAME_FLAG_EXTENDED if is_extended else 0
+    fd_active = bool(is_fd or len(data) > 8)
+    if fd_active:
+        flags |= FRAME_FLAG_FD
+        if bitrate_switch:
+            flags |= FRAME_FLAG_BRS
+        if error_state_indicator:
+            flags |= FRAME_FLAG_ESI
     dlc = len(data)
-    return struct.pack(">QIBB", timestamp_us, can_id, ext, dlc) + data
+    return struct.pack(">QIBB", timestamp_us, can_id, flags, dlc) + data
 
 
 class ClientManager:
@@ -192,17 +200,21 @@ BINARY PROTOCOL
 Each CAN frame is transmitted as a binary packet with the following format:
 
   ┌─────────────┬─────────────┬─────────┬─────────┬──────────────────┐
-  │ timestamp   │ can_id      │ ext     │ dlc     │ data             │
+  │ timestamp   │ can_id      │ flags   │ dlc     │ data             │
   │ 8 bytes     │ 4 bytes     │ 1 byte  │ 1 byte  │ 0-64 bytes       │
   └─────────────┴─────────────┴─────────┴─────────┴──────────────────┘
 
   timestamp : uint64_t, big-endian, microseconds since Unix epoch
   can_id    : uint32_t, big-endian, CAN arbitration ID
-  ext       : uint8_t, 0 = standard 11-bit ID, 1 = extended 29-bit ID
+  flags     : uint8_t bitfield
+              bit0 = extended ID (11-bit vs 29-bit)
+              bit1 = CAN-FD frame
+              bit2 = BRS (bit-rate switch, CAN-FD only)
+              bit3 = ESI (error state indicator, CAN-FD only)
   dlc       : uint8_t, data length (0-8 for CAN, 0-64 for CAN-FD)
   data      : raw CAN payload bytes
 
-  Total packet size: 14 + dlc bytes (14-22 bytes for classic CAN)
+  Total packet size: 14 + dlc bytes (14-22 bytes for classic CAN, up to 78 for CAN-FD)
 """
 
 TESTING_CONNECTION_HELP = """
