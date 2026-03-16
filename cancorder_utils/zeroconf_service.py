@@ -64,7 +64,10 @@ class LoggerZeroconfService:
             return False
 
         try:
-            hostname = socket.gethostname().rstrip(".") or "localhost"
+            hostname = socket.gethostname().rstrip(".")
+            while hostname.endswith(".local"):
+                hostname = hostname[: -len(".local")]
+            hostname = hostname or "localhost"
             ip_addr = _get_local_ip()
             addresses = [socket.inet_aton(ip_addr)]
         except OSError as exc:
