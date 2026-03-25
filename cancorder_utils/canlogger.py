@@ -23,7 +23,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 from .zeroconf_service import LoggerZeroconfService, SERVICE_NAME_PREFIX
 from .canlogger_common import (
@@ -35,6 +35,7 @@ from .canlogger_common import (
     zeroconf_log,
     pack_frame as _pack_frame,
     ClientManager,
+    RateLimitedLogger,
     client_handler_thread,
     tcp_server_thread,
     BINARY_PROTOCOL_HELP,
@@ -265,35 +266,115 @@ def find_any_can_device(bitrate: int) -> Optional[Tuple[can.Bus, str]]:
     return None
 
 
-def can_receiver_thread(bus: can.Bus, client_manager: ClientManager, verbose: bool):
-    """Thread that receives CAN frames and broadcasts to clients."""
+def open_requested_bus(interface: str, channel_arg: str, bitrate: int, auto: bool) -> Tuple[can.Bus, str]:
+    """Open the requested CAN bus or raise RuntimeError."""
+    if auto:
+        result = find_any_can_device(bitrate)
+        if result is None:
+            raise RuntimeError("No CAN device found during auto-detection")
+        bus, detected_interface = result
+        return bus, detected_interface
+
+    channel = int(channel_arg) if channel_arg.isdigit() else channel_arg
+    try:
+        bus = open_can_bus(interface, channel, bitrate)
+        return bus, interface
+    except Exception as exc:
+        channel_input = channel_arg if isinstance(channel_arg, str) else str(channel_arg)
+        prefer_socketcan = (
+            interface == DEFAULT_INTERFACE
+            and channel_input.lower().startswith(("can", "vcan"))
+        )
+        if prefer_socketcan:
+            try:
+                bus = open_can_bus("socketcan", channel_input, bitrate)
+                return bus, "socketcan"
+            except Exception as socketcan_exc:
+                raise RuntimeError(
+                    f"Failed to open CAN bus via {interface} ({exc}); "
+                    f"socketcan retry failed ({socketcan_exc})"
+                ) from socketcan_exc
+        raise RuntimeError(f"Failed to open CAN bus via {interface}: {exc}") from exc
+
+
+def can_receiver_thread(
+    open_bus: Callable[[], Tuple[can.Bus, str]],
+    client_manager: ClientManager,
+    verbose: bool,
+    stop_event: threading.Event,
+):
+    """Maintain a CAN connection and forward frames to TCP clients."""
     frame_count = 0
-    start_time = time.time()
+    bus: Optional[can.Bus] = None
+    verbose_limiter = RateLimitedLogger()
 
-    print(f"{ts()} {color('[can]', '32')} CAN receiver started on {bus.channel_info}")
+    while not stop_event.is_set():
+        if bus is None:
+            try:
+                bus, active_interface = open_bus()
+                print(f"{ts()} {color('[can]', '32')} CAN bus opened: {active_interface} ({bus.channel_info})")
+            except Exception as exc:
+                print(f"{ts()} {color('[can]', '31')} {exc}")
+                if stop_event.wait(1.0):
+                    break
+                print(f"{ts()} {color('[can]', '34')} Retrying CAN connection...")
+                continue
 
-    for msg in bus:
+        try:
+            msg = bus.recv(timeout=0.5)
+        except Exception as exc:
+            print(f"{ts()} {color('[can]', '31')} CAN interface lost on {bus.channel_info}: {exc}")
+            try:
+                bus.shutdown()
+            except Exception:
+                pass
+            bus = None
+            if stop_event.wait(1.0):
+                break
+            print(f"{ts()} {color('[can]', '34')} Retrying CAN connection...")
+            continue
+
+        if msg is None:
+            continue
+
         if getattr(msg, "is_error_frame", False):
             if verbose:
-                print(f"{ts()} {color('[can]', '33')} SKIP error frame")
+                verbose_limiter.log(
+                    "skip_error_frame",
+                    f"{ts()} {color('[can]', '33')} SKIP error frame",
+                )
             continue
 
         if msg.is_remote_frame:
             if verbose:
-                print(f"{ts()} {color('[can]', '33')} SKIP remote frame id=0x{msg.arbitration_id:X}")
+                verbose_limiter.log(
+                    "skip_remote_frame",
+                    f"{ts()} {color('[can]', '33')} SKIP remote frame id=0x{msg.arbitration_id:X}",
+                )
+            continue
+
+        clients = client_manager.client_count()
+        if clients == 0:
             continue
 
         frame_count += 1
         packet = pack_frame(msg)
-
-        if client_manager.client_count() > 0:
-            client_manager.broadcast(packet)
+        client_manager.broadcast(packet)
 
         if verbose:
             id_str = f"{msg.arbitration_id:08X}" if msg.is_extended_id else f"{msg.arbitration_id:03X}"
-            data_hex = bytes(msg.data).hex()
-            clients = client_manager.client_count()
-            print(f"{ts()} {color('[can]', '36')} #{frame_count:5d} ID={id_str} DLC={len(msg.data)} DATA={data_hex} -> {clients} client(s)")
+            data_hex = bytes(msg.data).hex().upper()
+            print(
+                f"{ts()} {color('[can]', '36')} "
+                f"FWD #{frame_count:5d} ID={id_str} DLC={len(msg.data)} "
+                f"DATA={data_hex} -> {clients} client(s)"
+            )
+
+    if bus is not None:
+        try:
+            bus.shutdown()
+        except Exception:
+            pass
 
 
 
@@ -340,7 +421,7 @@ def main():
     parser.add_argument(
         "--verbose", "-v",
         action="store_true",
-        help="Print each received CAN frame to stdout. "
+        help="Print each CAN frame when it is forwarded to TCP clients. "
              "Useful for debugging but may impact performance at high bus loads."
     )
     parser.add_argument(
@@ -381,64 +462,22 @@ def main():
     print(f"{ts()} {color('[init]', '34')} ECUconnect Logger Simulator starting...")
     print(f"{ts()} {color('[init]', '34')} TCP port: {port_label}, CAN bitrate: {args.bitrate}")
 
-    bus = None
-
-    if args.auto:
-        result = find_any_can_device(args.bitrate)
-        if result:
-            bus, args.interface = result
-        else:
-            bus = None
-    else:
-        try:
-            channel = int(args.channel) if args.channel.isdigit() else args.channel
-            bus = open_can_bus(args.interface, channel, args.bitrate)
-            print(f"{ts()} {color('[can]', '32')} CAN bus opened: {args.interface} ({bus.channel_info})")
-        except Exception as e:
-            print(f"{ts()} {color('[can]', '31')} Failed to open CAN bus: {e}")
-            channel_input = args.channel if isinstance(args.channel, str) else str(args.channel)
-            prefer_socketcan = (
-                args.interface == DEFAULT_INTERFACE
-                and channel_input.lower().startswith(("can", "vcan"))
-            )
-            if prefer_socketcan:
-                print(f"{ts()} {color('[can]', '34')} Retrying with socketcan interface on channel {channel_input}...")
-                try:
-                    bus = open_can_bus("socketcan", channel_input, args.bitrate)
-                    args.interface = "socketcan"  # Update interface to reflect actual usage
-                    print(f"{ts()} {color('[can]', '32')} CAN bus opened: socketcan ({bus.channel_info})")
-                except Exception as sock_err:
-                    print(f"{ts()} {color('[can]', '31')} SocketCAN retry failed: {sock_err}")
-            if bus is None:
-                print(f"{ts()} {color('[can]', '33')} Trying auto-detection...")
-                result = find_any_can_device(args.bitrate)
-                if result:
-                    bus, args.interface = result
-
-    if bus is None:
-        print(f"{ts()} {color('[error]', '31')} No CAN device found!")
-        print()
-        print("Make sure you have a supported CAN adapter connected:")
-        print("  - CANable (gs_usb)")
-        print("  - SLCAN device")
-        print("  - SocketCAN interface (Linux)")
-        print()
-        print("Install required packages:")
-        print("  pip3 install python-can gs_usb pyserial")
-        sys.exit(1)
-
     client_manager = ClientManager()
+    stop_event = threading.Event()
+
+    def open_bus() -> Tuple[can.Bus, str]:
+        return open_requested_bus(args.interface, args.channel, args.bitrate, args.auto)
 
     server_thread = threading.Thread(
         target=tcp_server_thread,
-        args=(listen_port, client_manager, None),
+        args=(listen_port, client_manager, stop_event),
         daemon=True
     )
     server_thread.start()
 
     can_thread = threading.Thread(
         target=can_receiver_thread,
-        args=(bus, client_manager, args.verbose),
+        args=(open_bus, client_manager, args.verbose, stop_event),
         daemon=True
     )
     can_thread.start()
@@ -451,7 +490,7 @@ def main():
         default_name = args.service_name or f"{SERVICE_NAME_PREFIX} {socket.gethostname()}:{listen_port}"
         metadata = {
             "process": Path(__file__).name,
-            "interface": args.interface,
+            "interface": args.interface if not args.auto else "auto",
             "channel": args.channel,
             "bitrate": str(args.bitrate),
         }
@@ -464,17 +503,22 @@ def main():
         zeroconf_service.start()
 
     try:
-        while True:
-            time.sleep(1)
+        while not stop_event.is_set():
+            if not can_thread.is_alive():
+                stop_event.set()
+                break
+            time.sleep(0.5)
     except KeyboardInterrupt:
         print(f"\n{ts()} {color('[exit]', '33')} Shutting down...")
+        stop_event.set()
+    finally:
         stats = client_manager.stats
         print(f"{ts()} {color('[stats]', '34')} Frames sent: {stats['frames_sent']}, dropped: {stats['frames_dropped']}, bytes: {stats['bytes_sent']}")
-    finally:
         if zeroconf_service:
             zeroconf_service.stop()
 
-        bus.shutdown()
+        client_manager.close_all()
+        can_thread.join(timeout=2.0)
     return 0
 
 

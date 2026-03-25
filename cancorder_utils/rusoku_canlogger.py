@@ -23,7 +23,7 @@ import threading
 import time
 from ctypes import *
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 import platform
 import signal
 
@@ -37,6 +37,7 @@ from .canlogger_common import (
     zeroconf_log,
     pack_frame as _pack_frame,
     ClientManager,
+    RateLimitedLogger,
     client_handler_thread,
     tcp_server_thread,
     BINARY_PROTOCOL_HELP,
@@ -330,43 +331,131 @@ def pack_frame(msg: Message) -> bytes:
     )
 
 
+def open_toucan_interface(library_path: str, channel: int, bitrate_index: int) -> TouCANInterface:
+    """Open and start a TouCAN interface or raise RuntimeError."""
+    can = TouCANInterface(library_path)
+
+    op_mode = OpMode()
+    op_mode.byte = CANMODE_DEFAULT.value
+
+    result = can.init(channel, op_mode)
+    if result < CANERR_NOERROR:
+        raise RuntimeError(f"Failed to initialize CAN interface: error {result}")
+
+    bitrate = Bitrate()
+    bitrate.index = bitrate_index
+
+    result = can.start(bitrate)
+    if result < CANERR_NOERROR:
+        can.exit()
+        raise RuntimeError(f"Failed to start CAN controller: error {result}")
+
+    return can
 
 
-def can_receiver_thread(can: TouCANInterface, client_manager: ClientManager, verbose: bool, stop_event: threading.Event):
-    """Thread that receives CAN frames and broadcasts to clients."""
+
+
+def can_receiver_thread(
+    open_can: Callable[[], TouCANInterface],
+    client_manager: ClientManager,
+    verbose: bool,
+    stop_event: threading.Event,
+):
+    """Maintain a TouCAN connection and forward frames to TCP clients."""
     frame_count = 0
-
-    print(f"{ts()} {color('[can]', '32')} CAN receiver started")
+    can: Optional[TouCANInterface] = None
+    verbose_limiter = RateLimitedLogger()
 
     while not stop_event.is_set():
-        result, msg = can.read(timeout=100)  # 100ms timeout for responsiveness
+        if can is None:
+            try:
+                can = open_can()
+                print(f"{ts()} {color('[can]', '32')} CAN interface ready")
+                print(f"{ts()} {color('[can]', '32')} Hardware: {can.hardware()}")
+                print(f"{ts()} {color('[can]', '32')} Firmware: {can.firmware()}")
+            except Exception as exc:
+                print(f"{ts()} {color('[can]', '31')} {exc}")
+                if stop_event.wait(1.0):
+                    break
+                print(f"{ts()} {color('[can]', '34')} Retrying CAN connection...")
+                continue
+
+        try:
+            result, msg = can.read(timeout=100)  # 100ms timeout for responsiveness
+        except Exception as exc:
+            print(f"{ts()} {color('[can]', '31')} CAN receive failed: {exc}")
+            try:
+                can.reset()
+            except Exception:
+                pass
+            try:
+                can.exit()
+            except Exception:
+                pass
+            can = None
+            if stop_event.wait(1.0):
+                break
+            print(f"{ts()} {color('[can]', '34')} Retrying CAN connection...")
+            continue
 
         if result == CANERR_NOERROR and msg is not None:
             if msg.flags.rtr:
                 if verbose:
-                    print(f"{ts()} {color('[can]', '33')} SKIP remote frame id=0x{msg.id:X}")
+                    verbose_limiter.log(
+                        "skip_remote_frame",
+                        f"{ts()} {color('[can]', '33')} SKIP remote frame id=0x{msg.id:X}",
+                    )
                 continue
 
             if msg.flags.sts:
                 if verbose:
-                    print(f"{ts()} {color('[can]', '33')} SKIP status frame")
+                    verbose_limiter.log(
+                        "skip_status_frame",
+                        f"{ts()} {color('[can]', '33')} SKIP status frame",
+                    )
+                continue
+
+            clients = client_manager.client_count()
+            if clients == 0:
                 continue
 
             frame_count += 1
             packet = pack_frame(msg)
-
-            if client_manager.client_count() > 0:
-                client_manager.broadcast(packet)
+            client_manager.broadcast(packet)
 
             if verbose:
                 id_str = f"{msg.id:08X}" if msg.flags.xtd else f"{msg.id:03X}"
-                data_hex = bytes(msg.data[:msg.dlc]).hex()
-                clients = client_manager.client_count()
-                print(f"{ts()} {color('[can]', '36')} #{frame_count:5d} ID={id_str} DLC={msg.dlc} DATA={data_hex} -> {clients} client(s)")
+                data_hex = bytes(msg.data[:msg.dlc]).hex().upper()
+                print(
+                    f"{ts()} {color('[can]', '36')} "
+                    f"FWD #{frame_count:5d} ID={id_str} DLC={msg.dlc} "
+                    f"DATA={data_hex} -> {clients} client(s)"
+                )
 
         elif result != CANERR_RX_EMPTY and result != -50:  # -50 is timeout
-            if verbose:
-                print(f"{ts()} {color('[can]', '31')} Read error: {result}")
+            print(f"{ts()} {color('[can]', '31')} CAN interface read error: {result}")
+            try:
+                can.reset()
+            except Exception:
+                pass
+            try:
+                can.exit()
+            except Exception:
+                pass
+            can = None
+            if stop_event.wait(1.0):
+                break
+            print(f"{ts()} {color('[can]', '34')} Retrying CAN connection...")
+
+    if can is not None:
+        try:
+            can.reset()
+        except Exception:
+            pass
+        try:
+            can.exit()
+        except Exception:
+            pass
 
 
 
@@ -419,7 +508,7 @@ def main():
     parser.add_argument(
         "--verbose", "-v",
         action="store_true",
-        help="Print each received CAN frame to stdout. "
+        help="Print each CAN frame when it is forwarded to TCP clients. "
              "Useful for debugging but may impact performance at high bus loads."
     )
     parser.add_argument(
@@ -460,42 +549,19 @@ def main():
     print(f"{ts()} {color('[init]', '34')} TCP port: {port_label}, CAN bitrate: {format_bitrate(args.bitrate)}")
 
     try:
-        can = TouCANInterface(args.library)
-        print(f"{ts()} {color('[can]', '32')} Library loaded: {can.version()}")
+        library = TouCANInterface(args.library)
+        print(f"{ts()} {color('[can]', '32')} Library loaded: {library.version()}")
     except RuntimeError as e:
         print(f"{ts()} {color('[error]', '31')} {e}")
         return 1
 
-    op_mode = OpMode()
-    op_mode.byte = CANMODE_DEFAULT.value
-
-    print(f"{ts()} {color('[can]', '34')} Initializing TouCAN channel {args.channel}...")
-    result = can.init(args.channel, op_mode)
-    if result < CANERR_NOERROR:
-        print(f"{ts()} {color('[error]', '31')} Failed to initialize CAN interface: error {result}")
-        print()
-        print("Make sure you have a TouCAN USB adapter connected:")
-        print("  - TouCAN USB (Model F4FS1)")
-        print()
-        print("Check USB devices:")
-        print("  system_profiler SPUSBDataType | grep -i toucan")
-        return 1
-
-    print(f"{ts()} {color('[can]', '32')} Hardware: {can.hardware()}")
-    print(f"{ts()} {color('[can]', '32')} Firmware: {can.firmware()}")
-
-    bitrate = Bitrate()
-    bitrate.index = bitrate_index
-
-    print(f"{ts()} {color('[can]', '34')} Starting CAN controller at {format_bitrate(args.bitrate)}...")
-    result = can.start(bitrate)
-    if result < CANERR_NOERROR:
-        print(f"{ts()} {color('[error]', '31')} Failed to start CAN controller: error {result}")
-        can.exit()
-        return 1
-
     client_manager = ClientManager()
     stop_event = threading.Event()
+
+    def open_can() -> TouCANInterface:
+        print(f"{ts()} {color('[can]', '34')} Initializing TouCAN channel {args.channel}...")
+        print(f"{ts()} {color('[can]', '34')} Starting CAN controller at {format_bitrate(args.bitrate)}...")
+        return open_toucan_interface(args.library, args.channel, bitrate_index)
 
     def signal_handler(signo, frame):
         print(f"\n{ts()} {color('[exit]', '33')} Received signal, shutting down...")
@@ -513,7 +579,7 @@ def main():
 
     can_thread = threading.Thread(
         target=can_receiver_thread,
-        args=(can, client_manager, args.verbose, stop_event),
+        args=(open_can, client_manager, args.verbose, stop_event),
         daemon=True
     )
     can_thread.start()
@@ -553,8 +619,8 @@ def main():
     if zeroconf_service:
         zeroconf_service.stop()
 
-    can.reset()
-    can.exit()
+    client_manager.close_all()
+    can_thread.join(timeout=2.0)
     return 0
 
 

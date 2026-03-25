@@ -1405,14 +1405,16 @@ def send_frames(
         if can_id == 0:
             continue
 
+        clients = client_manager.client_count()
+        if clients == 0:
+            continue
+
         # Create frame packet
         ts_us = int(time.time() * 1_000_000)
         packet = pack_frame(ts_us, can_id, False, data)
 
         frame_count += 1
-
-        if client_manager.client_count() > 0:
-            client_manager.broadcast(packet)
+        client_manager.broadcast(packet)
 
         if verbose:
             # Determine direction based on ID
@@ -1421,10 +1423,9 @@ def send_frames(
             else:
                 direction = "RX"
             data_hex = data.hex().upper()
-            clients = client_manager.client_count()
             print(
                 f"{ts()} {color('[can]', '36')} "
-                f"#{frame_count:5d} {direction} ID={can_id:03X} "
+                f"FWD #{frame_count:5d} {direction} ID={can_id:03X} "
                 f"DLC={len(data)} DATA={data_hex} -> {clients} client(s)"
             )
 
@@ -1550,7 +1551,7 @@ def main():
     parser.add_argument(
         "--verbose", "-v",
         action="store_true",
-        help="Print each generated CAN frame to stdout."
+        help="Print each CAN frame when it is forwarded to TCP clients."
     )
     parser.add_argument(
         "--no-loop",
@@ -1672,6 +1673,7 @@ def main():
     if zeroconf_service:
         zeroconf_service.stop()
 
+    client_manager.close_all()
     return 0
 
 

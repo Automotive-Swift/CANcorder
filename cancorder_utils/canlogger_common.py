@@ -51,6 +51,34 @@ def zeroconf_log(message: str):
     print(f"{ts()} {color('[zeroconf]', '35')} {message}")
 
 
+class RateLimitedLogger:
+    """Emit a message immediately, then summarize repeats at a fixed interval."""
+
+    def __init__(self, interval_seconds: float = 5.0):
+        self.interval_seconds = interval_seconds
+        self._state: Dict[str, Dict[str, Any]] = {}
+
+    def log(self, key: str, message: str) -> None:
+        now = time.monotonic()
+        state = self._state.get(key)
+        if state is None:
+            self._state[key] = {"last": now, "suppressed": 0}
+            print(message)
+            return
+
+        elapsed = now - state["last"]
+        if elapsed >= self.interval_seconds:
+            suffix = ""
+            if state["suppressed"]:
+                suffix = f" (repeated {state['suppressed']} more times)"
+            print(f"{message}{suffix}")
+            state["last"] = now
+            state["suppressed"] = 0
+            return
+
+        state["suppressed"] += 1
+
+
 def pack_frame(
     timestamp_us: int,
     can_id: int,
@@ -140,14 +168,27 @@ class ClientManager:
             self.remove_client(sock)
 
 
-def client_handler_thread(sock: socket.socket, addr: Tuple[str, int], client_manager: ClientManager):
+def client_handler_thread(
+    sock: socket.socket,
+    addr: Tuple[str, int],
+    client_manager: ClientManager,
+    stop_event: Optional[threading.Event] = None,
+):
     """Handle a single client connection (just keep it alive)."""
     client_manager.add_client(sock, addr)
 
     try:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if stop_event is not None:
+            sock.settimeout(1.0)
         while True:
-            data = sock.recv(1024)
+            if stop_event is not None and stop_event.is_set():
+                break
+            try:
+                data = sock.recv(1024)
+            except socket.timeout:
+                continue
             if not data:
                 break
     except (OSError, ConnectionResetError):
@@ -177,7 +218,7 @@ def tcp_server_thread(port: int, client_manager: ClientManager, stop_event: Opti
             client_sock, addr = server.accept()
             t = threading.Thread(
                 target=client_handler_thread,
-                args=(client_sock, addr, client_manager),
+                args=(client_sock, addr, client_manager, stop_event),
                 daemon=True
             )
             t.start()
